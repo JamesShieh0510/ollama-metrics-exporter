@@ -8,7 +8,6 @@ from fastapi.responses import Response
 import uvicorn
 
 OLLAMA_BASE = "http://127.0.0.1:11434"
-
 app = FastAPI()
 
 # ---- Prometheus metrics ----
@@ -17,13 +16,11 @@ ollama_requests_total = Counter(
     "Total Ollama generate requests",
     ["node"]
 )
-
 ollama_inflight_requests = Gauge(
     "ollama_inflight_requests",
     "Current inflight Ollama requests",
     ["node"]
 )
-
 ollama_request_latency = Histogram(
     "ollama_request_latency_seconds",
     "Ollama request latency",
@@ -33,15 +30,24 @@ ollama_request_latency = Histogram(
 
 NODE_NAME = "node1"  # 每台機器改這個（node1/node2/...）
 
+# ✅ 啟動時初始化 metrics,讓 Prometheus 立即看到數據
+@app.on_event("startup")
+async def startup_event():
+    # 初始化 gauge 為 0
+    ollama_inflight_requests.labels(node=NODE_NAME).set(0)
+    # 初始化 counter 為 0(觸發第一次記錄)
+    ollama_requests_total.labels(node=NODE_NAME).inc(0)
+    # 初始化 histogram(記錄一個 0 值)
+    ollama_request_latency.labels(node=NODE_NAME).observe(0)
+
 # ---- Proxy endpoint ----
 @app.post("/api/generate")
 async def generate(req: Request):
     body = await req.body()
     headers = dict(req.headers)
-
+    
     ollama_inflight_requests.labels(node=NODE_NAME).inc()
     start = time.time()
-
     try:
         resp = requests.post(
             f"{OLLAMA_BASE}/api/generate",
@@ -68,4 +74,3 @@ def metrics():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9101)
-
