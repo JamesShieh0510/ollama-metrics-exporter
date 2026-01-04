@@ -22,7 +22,7 @@ OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", "11434"))  # 監控的 Ollama 端口
 app = FastAPI()
 
 # ---- Prometheus metrics ----
-NODE_NAME = os.getenv("NODE_NAME", "node1")  # 從 .env 讀取，預設為 node1
+NODE_NAME = os.getenv("NODE_NAME", "node{#}")  # 從 .env 讀取，預設為 node1
 
 # 連接數相關 metrics
 ollama_connections = Gauge(
@@ -42,6 +42,21 @@ ollama_bytes_recv = Counter(
     "ollama_bytes_recv_total",
     "Total bytes received from Ollama port",
     ["node"]
+)
+
+# 🌟 新增：網絡拓撲 metrics - 用於 NodeGraph
+# 虛擬 router 節點 (中心節點)
+ollama_router_node = Gauge(
+    "ollama_router_connections",
+    "Virtual router node for network topology",
+    []
+)
+
+# 邊 (edges) - 從各節點到 router 的連接
+ollama_node_to_router = Gauge(
+    "ollama_node_to_router",
+    "Connection from node to router (for NodeGraph edges)",
+    ["source", "target"]
 )
 
 # 連接狀態追蹤（用於計算流量變化）
@@ -150,6 +165,15 @@ async def monitor_port():
             ollama_connections.labels(node=NODE_NAME, state="ESTABLISHED").set(established_count)
             ollama_connections.labels(node=NODE_NAME, state="LISTEN").set(listen_count)
             
+            # 🌟 更新網絡拓撲 metrics
+            # 設置虛擬 router 節點（總連接數）
+            total_connections = established_count
+            ollama_router_node.set(total_connections)
+            
+            # 設置從當前節點到 router 的邊
+            # 邊的值 = 當前節點的連接數
+            ollama_node_to_router.labels(source=NODE_NAME, target="router").set(established_count)
+            
             # 計算時間差
             current_time = time_module.time()
             time_elapsed = current_time - last_check_time
@@ -186,6 +210,9 @@ async def startup_event():
     # 初始化 counter（觸發第一次記錄，讓 Prometheus 知道這些 metrics 存在）
     ollama_bytes_sent.labels(node=NODE_NAME).inc(0)
     ollama_bytes_recv.labels(node=NODE_NAME).inc(0)
+    # 🌟 初始化網絡拓撲 metrics
+    ollama_router_node.set(0)
+    ollama_node_to_router.labels(source=NODE_NAME, target="router").set(0)
     # 啟動後台監控任務
     asyncio.create_task(monitor_port())
 
