@@ -1,4 +1,4 @@
-cat ollama_exporter.py 
+
 import time
 import socket
 from typing import Tuple
