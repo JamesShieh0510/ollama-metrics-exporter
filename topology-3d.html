@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama 集群網絡拓撲圖</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+            background: #f5f7fa;
+            color: #333;
+            overflow: hidden;
+        }
+        
+        #container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+        
+        #canvas {
+            width: 100%;
+            height: 100%;
+        }
+        
+        #info-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            border: 1px solid #e0e0e0;
+            min-width: 280px;
+            z-index: 100;
+        }
+        
+        #info-panel h2 {
+            margin-bottom: 15px;
+            color: #2563eb;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        .node-info {
+            margin: 8px 0;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border-left: 3px solid #2563eb;
+        }
+        
+        .node-info strong {
+            color: #1e40af;
+            display: block;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+        
+        .stat {
+            display: flex;
+            justify-content: space-between;
+            margin: 4px 0;
+            font-size: 12px;
+        }
+        
+        .stat-label {
+            color: #6b7280;
+        }
+        
+        .stat-value {
+            color: #059669;
+            font-weight: 600;
+        }
+        
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            border: 1px solid #e0e0e0;
+            z-index: 100;
+        }
+        
+        #controls h3 {
+            margin-bottom: 10px;
+            font-size: 13px;
+            color: #374151;
+        }
+        
+        #controls button {
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            padding: 6px 12px;
+            margin: 3px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        #controls button:hover {
+            background: #1d4ed8;
+        }
+        
+        #status {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 10px 15px;
+            border-radius: 6px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            border: 1px solid #e0e0e0;
+            font-size: 12px;
+            color: #374151;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            background: #10b981;
+        }
+        
+        #legend {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            border: 1px solid #e0e0e0;
+            font-size: 12px;
+        }
+        
+        #legend h3 {
+            margin-bottom: 10px;
+            font-size: 13px;
+            color: #374151;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 6px 0;
+            color: #6b7280;
+        }
+        
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            margin-right: 8px;
+            border: 1px solid #e0e0e0;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <canvas id="canvas"></canvas>
+        
+        <div id="info-panel">
+            <h2>📊 節點狀態</h2>
+            <div id="nodes-info"></div>
+        </div>
+        
+        <div id="controls">
+            <h3>控制</h3>
+            <button onclick="resetCamera()">重置視角</button>
+            <button onclick="toggleAutoRotate()">自動旋轉</button>
+        </div>
+        
+        <div id="status">
+            <span class="status-indicator"></span>
+            <span id="status-text">正在連接...</span>
+        </div>
+        
+        <div id="legend">
+            <h3>圖例</h3>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #3b82f6;"></div>
+                <span>Router (網關)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #10b981;"></div>
+                <span>Node (活躍)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #9ca3af;"></div>
+                <span>Node (空閒)</span>
+            </div>
+            <div class="legend-item">
+                <div style="width: 16px; height: 2px; background: #f59e0b; margin-right: 8px; border-radius: 1px;"></div>
+                <span>網絡連接</span>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <script>
+        // 配置
+        const CONFIG = {
+            exporterUrls: {
+                node1: 'http://192.168.50.158:9101/metrics',
+                node2: 'http://192.168.50.31:9101/metrics',
+                node3: 'http://192.168.50.94:9101/metrics',
+                node4: 'http://192.168.50.155:9101/metrics',
+                router: null
+            },
+            updateInterval: 2000,
+            nodePositions: {
+                router: { x: 0, y: 0, z: 0 },
+                node1: { x: 4, y: 0, z: 0 },
+                node2: { x: -4, y: 0, z: 0 },
+                node3: { x: 0, y: 0, z: 4 },
+                node4: { x: 0, y: 0, z: -4 }
+            },
+            nodeColors: {
+                router: 0x3b82f6,    // 藍色
+                active: 0x10b981,      // 綠色
+                idle: 0x9ca3af        // 灰色
+            }
+        };
+        
+        // 場景設置
+        let scene, camera, renderer, controls;
+        let nodeMeshes = {};
+        let edgeLines = {};
+        let autoRotate = false;
+        let previousData = {}; // 保存上一次的數據用於計算 rate
+        
+        // 初始化 Three.js 場景
+        function initScene() {
+            // 創建場景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xf5f7fa);
+            
+            // 創建相機
+            camera = new THREE.PerspectiveCamera(
+                60,
+                window.innerWidth / window.innerHeight,
+                0.1,
+                1000
+            );
+            camera.position.set(10, 8, 10);
+            camera.lookAt(0, 0, 0);
+            
+            // 創建渲染器
+            renderer = new THREE.WebGLRenderer({
+                canvas: document.getElementById('canvas'),
+                antialias: true
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            
+            // 添加軌道控制器
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 5;
+            controls.maxDistance = 50;
+            
+            // 添加光源（專業網絡拓撲風格）
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 10, 5);
+            directionalLight.castShadow = true;
+            scene.add(directionalLight);
+            
+            // 創建節點
+            createNodes();
+            
+            // 創建連接線
+            createEdges();
+            
+            // 添加地面網格（網絡拓撲風格）
+            const gridHelper = new THREE.GridHelper(20, 20, 0xd1d5db, 0xe5e7eb);
+            gridHelper.position.y = -0.1;
+            scene.add(gridHelper);
+            
+            // 添加地面平面
+            const planeGeometry = new THREE.PlaneGeometry(30, 30);
+            const planeMaterial = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                roughness: 0.8,
+                metalness: 0.1
+            });
+            const plane = new THREE.Mesh(planeGeometry, planeMaterial);
+            plane.rotation.x = -Math.PI / 2;
+            plane.position.y = -0.1;
+            plane.receiveShadow = true;
+            scene.add(plane);
+            
+            // 開始動畫循環
+            animate();
+        }
+        
+        // 創建節點（服務器機架風格）
+        function createNodes() {
+            const nodeNames = ['router', 'node1', 'node2', 'node3', 'node4'];
+            
+            nodeNames.forEach(nodeName => {
+                const pos = CONFIG.nodePositions[nodeName];
+                
+                // 創建服務器機架樣式的節點（立方體）
+                const width = nodeName === 'router' ? 0.8 : 0.6;
+                const height = nodeName === 'router' ? 1.2 : 1.0;
+                const depth = 0.6;
+                
+                const geometry = new THREE.BoxGeometry(width, height, depth);
+                const material = new THREE.MeshStandardMaterial({
+                    color: nodeName === 'router' ? CONFIG.nodeColors.router : CONFIG.nodeColors.idle,
+                    roughness: 0.3,
+                    metalness: 0.7,
+                    emissive: 0x000000
+                });
+                
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(pos.x, height / 2, pos.z);
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                mesh.userData.nodeName = nodeName;
+                scene.add(mesh);
+                nodeMeshes[nodeName] = mesh;
+                
+                // 添加頂部指示燈
+                const indicatorGeometry = new THREE.CylinderGeometry(0.1, 0.1, 0.05, 16);
+                const indicatorMaterial = new THREE.MeshStandardMaterial({
+                    color: 0x9ca3af,
+                    emissive: 0x000000
+                });
+                const indicator = new THREE.Mesh(indicatorGeometry, indicatorMaterial);
+                indicator.position.set(0, height / 2 + 0.05, 0);
+                indicator.userData.isIndicator = true;
+                mesh.add(indicator);
+                
+                // 添加標簽背景
+                const labelBgGeometry = new THREE.PlaneGeometry(1.5, 0.4);
+                const labelBgMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 0.9
+                });
+                const labelBg = new THREE.Mesh(labelBgGeometry, labelBgMaterial);
+                labelBg.position.set(0, height + 0.5, 0);
+                labelBg.lookAt(camera.position);
+                mesh.add(labelBg);
+            });
+        }
+        
+        // 創建連接線（網絡線風格）
+        function createEdges() {
+            const nodeNames = ['node1', 'node2', 'node3', 'node4'];
+            
+            nodeNames.forEach(nodeName => {
+                const sourcePos = CONFIG.nodePositions[nodeName];
+                const targetPos = CONFIG.nodePositions.router;
+                
+                const geometry = new THREE.BufferGeometry();
+                const positions = new Float32Array([
+                    sourcePos.x, 0.6, sourcePos.z,
+                    targetPos.x, 0.6, targetPos.z
+                ]);
+                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                
+                const material = new THREE.LineBasicMaterial({
+                    color: 0xf59e0b,
+                    transparent: true,
+                    opacity: 0.4,
+                    linewidth: 2
+                });
+                
+                const line = new THREE.Line(geometry, material);
+                scene.add(line);
+                edgeLines[nodeName] = line;
+            });
+        }
+        
+        // 更新節點外觀
+        function updateNodes(data) {
+            Object.keys(nodeMeshes).forEach(nodeName => {
+                const mesh = nodeMeshes[nodeName];
+                const nodeData = data[nodeName] || { connections: 0, sentRate: 0, recvRate: 0 };
+                
+                // 根據連接數調整顏色和指示燈
+                const isActive = (nodeData.connections || 0) > 0;
+                
+                if (nodeName === 'router') {
+                    mesh.material.color.setHex(CONFIG.nodeColors.router);
+                } else {
+                    mesh.material.color.setHex(isActive ? CONFIG.nodeColors.active : CONFIG.nodeColors.idle);
+                }
+                
+                // 更新指示燈
+                const indicator = mesh.children.find(child => child.userData.isIndicator);
+                if (indicator) {
+                    indicator.material.color.setHex(isActive ? 0x10b981 : 0x9ca3af);
+                    indicator.material.emissive.setHex(isActive ? 0x064e3b : 0x000000);
+                }
+            });
+        }
+        
+        // 更新連接線
+        function updateEdges(data) {
+            Object.keys(edgeLines).forEach(nodeName => {
+                const line = edgeLines[nodeName];
+                const nodeData = data[nodeName] || { connections: 0, sentRate: 0, recvRate: 0 };
+                const totalRate = (nodeData.sentRate || 0) + (nodeData.recvRate || 0);
+                
+                // 根據流量調整線條顏色和透明度
+                if (totalRate > 0) {
+                    line.material.color.setHex(0x10b981); // 綠色表示有流量
+                    line.material.opacity = Math.min(0.3 + totalRate / 50000, 0.9);
+                } else {
+                    line.material.color.setHex(0xf59e0b); // 橙色表示無流量
+                    line.material.opacity = 0.2;
+                }
+            });
+        }
+        
+        // 解析 Prometheus metrics
+        function parseMetrics(text, nodeName) {
+            const data = { connections: 0, sentTotal: 0, recvTotal: 0 };
+            const lines = text.split('\n');
+            
+            lines.forEach(line => {
+                line = line.trim();
+                if (line.startsWith('#') || !line) return;
+                
+                // 解析 metric - 支持多種格式
+                let match = line.match(/^([a-z_]+)\{([^}]+)\}\s+([0-9.eE+-]+)/);
+                if (!match) {
+                    // 嘗試不帶標簽的格式
+                    match = line.match(/^([a-z_]+)\s+([0-9.eE+-]+)/);
+                    if (match) {
+                        const metricName = match[1];
+                        const value = parseFloat(match[2]);
+                        if (metricName === 'ollama_bytes_sent_total') {
+                            data.sentTotal = value;
+                        } else if (metricName === 'ollama_bytes_recv_total') {
+                            data.recvTotal = value;
+                        }
+                    }
+                    return;
+                }
+                
+                const metricName = match[1];
+                const labels = match[2];
+                const value = parseFloat(match[3]);
+                
+                // 解析 labels
+                const nodeMatch = labels.match(/node="([^"]+)"/);
+                if (nodeMatch && nodeMatch[1] === nodeName) {
+                    if (metricName === 'ollama_connections') {
+                        const stateMatch = labels.match(/state="([^"]+)"/);
+                        if (stateMatch && stateMatch[1] === 'ESTABLISHED') {
+                            data.connections = value;
+                        }
+                    } else if (metricName === 'ollama_bytes_sent_total') {
+                        data.sentTotal = value;
+                    } else if (metricName === 'ollama_bytes_recv_total') {
+                        data.recvTotal = value;
+                    }
+                }
+            });
+            
+            return data;
+        }
+        
+        // 獲取單個 exporter 的 metrics
+        async function fetchSingleExporter(url, nodeName) {
+            try {
+                const response = await fetch(url, { mode: 'cors' });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const text = await response.text();
+                const parsed = parseMetrics(text, nodeName);
+                
+                // 計算 rate（與上一次的值比較）
+                const prev = previousData[nodeName] || { sentTotal: 0, recvTotal: 0 };
+                const timeDiff = CONFIG.updateInterval / 1000; // 秒
+                
+                const result = {
+                    connections: parsed.connections,
+                    sentTotal: parsed.sentTotal,
+                    recvTotal: parsed.recvTotal,
+                    sentRate: Math.max(0, (parsed.sentTotal - prev.sentTotal) / timeDiff),
+                    recvRate: Math.max(0, (parsed.recvTotal - prev.recvTotal) / timeDiff)
+                };
+                
+                // 保存當前值供下次使用
+                previousData[nodeName] = {
+                    sentTotal: parsed.sentTotal,
+                    recvTotal: parsed.recvTotal
+                };
+                
+                return result;
+            } catch (error) {
+                console.warn(`無法獲取 ${nodeName} 的數據:`, error);
+                return null;
+            }
+        }
+        
+        // 獲取所有 metrics 數據
+        async function fetchMetrics() {
+            const allData = {};
+            let successCount = 0;
+            
+            if (CONFIG.exporterUrls) {
+                const promises = Object.entries(CONFIG.exporterUrls).map(async ([nodeName, url]) => {
+                    if (!url) {
+                        // router 是虛擬節點，計算總和
+                        const totalConnections = Object.keys(allData)
+                            .filter(k => k !== 'router' && k.startsWith('node'))
+                            .reduce((sum, k) => sum + (allData[k]?.connections || 0), 0);
+                        allData[nodeName] = { 
+                            connections: totalConnections, 
+                            sentRate: 0, 
+                            recvRate: 0 
+                        };
+                        return;
+                    }
+                    
+                    const nodeData = await fetchSingleExporter(url, nodeName);
+                    if (nodeData) {
+                        allData[nodeName] = nodeData;
+                        successCount++;
+                    } else {
+                        allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                    }
+                });
+                
+                await Promise.all(promises);
+                
+                // 重新計算 router 的連接數
+                const totalConnections = Object.keys(allData)
+                    .filter(k => k !== 'router' && k.startsWith('node'))
+                    .reduce((sum, k) => sum + (allData[k]?.connections || 0), 0);
+                if (allData.router) {
+                    allData.router.connections = totalConnections;
+                }
+            }
+            
+            if (successCount === 0) {
+                document.getElementById('status-text').textContent = 
+                    `⚠️ 無法連接到 exporter | 檢查 exporter 是否運行`;
+            } else {
+                document.getElementById('status-text').textContent = 
+                    `✅ 已連接 ${successCount} 個節點 | 最後更新: ${new Date().toLocaleTimeString()}`;
+            }
+            
+            updateNodes(allData);
+            updateEdges(allData);
+            updateInfoPanel(allData);
+            
+            return allData;
+        }
+        
+        // 更新信息面板
+        function updateInfoPanel(data) {
+            const container = document.getElementById('nodes-info');
+            container.innerHTML = '';
+            
+            const nodeNames = ['router', 'node1', 'node2', 'node3', 'node4'];
+            nodeNames.forEach(nodeName => {
+                const nodeData = data[nodeName] || { connections: 0, sentRate: 0, recvRate: 0 };
+                const totalRate = nodeData.sentRate + nodeData.recvRate;
+                
+                const div = document.createElement('div');
+                div.className = 'node-info';
+                div.innerHTML = `
+                    <strong>${nodeName.toUpperCase()}</strong>
+                    <div class="stat">
+                        <span class="stat-label">連接數:</span>
+                        <span class="stat-value">${Math.round(nodeData.connections || 0)}</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">發送速率:</span>
+                        <span class="stat-value">${formatBytes(nodeData.sentRate || 0)}/s</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">接收速率:</span>
+                        <span class="stat-value">${formatBytes(nodeData.recvRate || 0)}/s</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">總流量:</span>
+                        <span class="stat-value">${formatBytes(totalRate)}/s</span>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+        }
+        
+        // 格式化字節數
+        function formatBytes(bytes) {
+            if (bytes === 0 || isNaN(bytes)) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+        
+        // 動畫循環
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if (autoRotate) {
+                const time = Date.now() * 0.0003;
+                camera.position.x = Math.cos(time) * 15;
+                camera.position.z = Math.sin(time) * 15;
+                camera.position.y = 8;
+                camera.lookAt(0, 0, 0);
+            }
+            
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        
+        // 控制函數
+        function resetCamera() {
+            camera.position.set(10, 8, 10);
+            camera.lookAt(0, 0, 0);
+            controls.reset();
+        }
+        
+        function toggleAutoRotate() {
+            autoRotate = !autoRotate;
+        }
+        
+        // 窗口大小調整
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+        // 初始化
+        initScene();
+        
+        // 定期獲取數據
+        fetchMetrics();
+        setInterval(fetchMetrics, CONFIG.updateInterval);
+    </script>
+</body>
+</html>

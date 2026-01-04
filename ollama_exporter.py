@@ -2,6 +2,7 @@ import os
 import platform
 import asyncio
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
 )
@@ -20,6 +21,15 @@ load_dotenv()
 
 OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", "11434"))  # 監控的 Ollama 端口
 app = FastAPI()
+
+# 添加 CORS 支持，允许前端页面访问
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 生产环境建议限制具体域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---- Prometheus metrics ----
 NODE_NAME = os.getenv("NODE_NAME", "node1")  # 從 .env 讀取，預設為 node1
