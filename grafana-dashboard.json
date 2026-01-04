@@ -816,6 +816,18 @@
           "refId": "C",
           "intervalMs": 15000,
           "maxDataPoints": 1000
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "label_replace(vector(0), \"source\", \"router\", \"\", \"\") or label_replace(vector(0), \"source\", \"node1\", \"\", \"\") or label_replace(vector(0), \"source\", \"node2\", \"\", \"\") or label_replace(vector(0), \"source\", \"node3\", \"\", \"\") or label_replace(vector(0), \"source\", \"node4\", \"\", \"\")",
+          "format": "table",
+          "instant": true,
+          "refId": "D",
+          "intervalMs": 15000,
+          "maxDataPoints": 1000
         }
       ],
       "title": "網絡拓撲圖 - Ollama 集群 (4 Nodes + Router)",
@@ -891,25 +903,6 @@
                 "secondaryStat",
                 "mainStat"
               ]
-            }
-          }
-        },
-        {
-          "id": "groupBy",
-          "options": {
-            "fields": {
-              "label": {
-                "aggregations": [],
-                "operation": "groupby"
-              },
-              "secondaryStat": {
-                "aggregations": ["lastNotNull"],
-                "operation": "aggregate"
-              },
-              "mainStat": {
-                "aggregations": ["lastNotNull"],
-                "operation": "aggregate"
-              }
             }
           }
         }
