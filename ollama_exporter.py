@@ -44,14 +44,6 @@ ollama_bytes_recv = Counter(
     ["node"]
 )
 
-# 🌟 新增：網絡拓撲 metrics - 用於 NodeGraph
-# 虛擬 router 節點 (中心節點) - 使用相同的格式以便 NodeGraph 識別
-ollama_router_node = Gauge(
-    "ollama_connections",
-    "Current number of connections to Ollama port",
-    ["node", "state"]
-)
-
 # 邊 (edges) - 從各節點到 router 的連接
 ollama_node_to_router = Gauge(
     "ollama_node_to_router",
@@ -166,9 +158,9 @@ async def monitor_port():
             ollama_connections.labels(node=NODE_NAME, state="LISTEN").set(listen_count)
             
             # 🌟 更新網絡拓撲 metrics
-            # 設置虛擬 router 節點（使用相同的 metric，這樣可以在 NodeGraph 中顯示）
+            # 設置虛擬 router 節點（使用相同的 ollama_connections metric）
             # 計算所有節點的總連接數（這在單個 exporter 中就是當前節點的連接數）
-            ollama_router_node.labels(node="router", state="ESTABLISHED").set(established_count)
+            ollama_connections.labels(node="router", state="ESTABLISHED").set(established_count)
             
             # 設置從當前節點到 router 的邊
             # 邊的值 = 當前節點的連接數
@@ -211,7 +203,7 @@ async def startup_event():
     ollama_bytes_sent.labels(node=NODE_NAME).inc(0)
     ollama_bytes_recv.labels(node=NODE_NAME).inc(0)
     # 🌟 初始化網絡拓撲 metrics
-    ollama_router_node.labels(node="router", state="ESTABLISHED").set(0)
+    ollama_connections.labels(node="router", state="ESTABLISHED").set(0)
     ollama_node_to_router.labels(source=NODE_NAME, target="router").set(0)
     # 啟動後台監控任務
     asyncio.create_task(monitor_port())
