@@ -1,3 +1,4 @@
+cat ollama_exporter.py 
 import time
 import socket
 from typing import Tuple
@@ -63,4 +64,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
