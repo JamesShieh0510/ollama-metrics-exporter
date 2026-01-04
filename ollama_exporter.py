@@ -180,8 +180,12 @@ async def monitor_port():
 # ✅ 啟動時開始監控
 @app.on_event("startup")
 async def startup_event():
-    # 初始化 metrics
+    # 初始化所有 metrics，確保 Prometheus 可以看到它們
     ollama_connections.labels(node=NODE_NAME, state="ESTABLISHED").set(0)
+    ollama_connections.labels(node=NODE_NAME, state="LISTEN").set(0)
+    # 初始化 counter（觸發第一次記錄，讓 Prometheus 知道這些 metrics 存在）
+    ollama_bytes_sent.labels(node=NODE_NAME).inc(0)
+    ollama_bytes_recv.labels(node=NODE_NAME).inc(0)
     # 啟動後台監控任務
     asyncio.create_task(monitor_port())
 
