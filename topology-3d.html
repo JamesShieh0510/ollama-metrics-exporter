@@ -285,10 +285,12 @@
         let edgeLines = {};
         let edgeLabels = {}; // 連接線上的標簽
         let detailLabels = {}; // 詳細信息標簽（hover時顯示）
+        let modelLabels = {}; // 已加載模型標簽（顯示在節點下方）
         let raycaster, mouse;
         let hoveredNode = null;
         let autoRotate = false;
         let previousData = {}; // 保存上一次的數據用於計算 rate
+        let loadedModelsData = {}; // 保存已加載模型數據
         
         // 初始化 Three.js 場景
         function initScene() {
@@ -618,6 +620,33 @@
                 simpleLabel.userData.isLabel = true;
                 mesh.add(simpleLabel);
                 
+                // 創建已加載模型標簽（顯示在節點下方，初始為空）
+                if (nodeName !== 'router') {
+                    const modelLabelTexture = createTextTexture([{ text: '' }], {
+                        fontSize: 16,
+                        fontFamily: 'Arial, sans-serif',
+                        fontWeight: 'normal',
+                        textColor: '#059669',
+                        backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                        padding: 6,
+                        vertical: false
+                    });
+                    
+                    const modelLabelMaterial = new THREE.MeshBasicMaterial({
+                        map: modelLabelTexture,
+                        transparent: true,
+                        side: THREE.DoubleSide
+                    });
+                    
+                    const modelLabelGeometry = new THREE.PlaneGeometry(1.5, 0.2);
+                    const modelLabel = new THREE.Mesh(modelLabelGeometry, modelLabelMaterial);
+                    modelLabel.position.set(0, -height / 2 - 0.3, 0);
+                    modelLabel.userData.isModelLabel = true;
+                    modelLabel.userData.nodeName = nodeName;
+                    mesh.add(modelLabel);
+                    modelLabels[nodeName] = modelLabel;
+                }
+                
                 // 創建詳細信息標簽（hover時顯示，初始隱藏）
                 if (nodeInfo) {
                     const detailLabelLines = [];
@@ -891,6 +920,57 @@
             }
         }
         
+        // 獲取已加載模型
+        async function fetchLoadedModels() {
+            try {
+                const response = await fetch('/nodes/loaded-models');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                loadedModelsData = data;
+                updateModelLabels();
+            } catch (error) {
+                console.warn('無法獲取已加載模型:', error);
+            }
+        }
+        
+        // 更新模型標簽
+        function updateModelLabels() {
+            Object.keys(modelLabels).forEach(nodeName => {
+                const label = modelLabels[nodeName];
+                const models = loadedModelsData[nodeName]?.models || [];
+                
+                let text = '';
+                if (models.length > 0) {
+                    // 顯示模型列表，最多顯示3個，超過顯示 "..."
+                    const displayModels = models.slice(0, 3);
+                    text = displayModels.join(', ');
+                    if (models.length > 3) {
+                        text += ` +${models.length - 3}`;
+                    }
+                } else {
+                    text = '無模型';
+                }
+                
+                const newTexture = createTextTexture([{ text: text }], {
+                    fontSize: 16,
+                    fontFamily: 'Arial, sans-serif',
+                    fontWeight: 'normal',
+                    textColor: models.length > 0 ? '#059669' : '#9ca3af',
+                    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                    padding: 6,
+                    vertical: false
+                });
+                
+                label.material.map.dispose();
+                label.material.map = newTexture;
+                label.material.needsUpdate = true;
+                
+                // 根據文本長度調整標簽寬度
+                const textWidth = Math.max(1.0, Math.min(2.5, text.length * 0.15));
+                label.scale.x = textWidth / 1.5;
+            });
+        }
+        
         // 獲取所有 metrics 數據
         async function fetchMetrics() {
             const allData = {};
@@ -1035,6 +1115,10 @@
                 if (detailLabel) {
                     detailLabel.lookAt(camera.position);
                 }
+                const modelLabel = mesh.children.find(child => child.userData.isModelLabel);
+                if (modelLabel) {
+                    modelLabel.lookAt(camera.position);
+                }
             });
             
             // 更新連接線標簽朝向
@@ -1120,7 +1204,9 @@
         
         // 定期獲取數據
         fetchMetrics();
+        fetchLoadedModels(); // 獲取已加載模型
         setInterval(fetchMetrics, CONFIG.updateInterval);
+        setInterval(fetchLoadedModels, CONFIG.updateInterval * 2); // 每4秒更新一次模型列表
     </script>
 </body>
 </html>

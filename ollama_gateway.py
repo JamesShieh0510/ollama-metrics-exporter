@@ -601,16 +601,11 @@ async def proxy_request(request: Request, path: str):
         raise HTTPException(status_code=502, detail=f"Error proxying to {node_name}: {str(e)}")
 
 
-# 根路徑重定向到拓撲頁面（必須在通配符路由之前）
+# 根路徑顯示儀表板（包含運行中的進程）（必須在通配符路由之前）
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """根路徑，重定向到拓撲可視化或顯示歡迎頁面"""
-    try:
-        # 嘗試返回拓撲頁面
-        return await topology_viewer()
-    except Exception:
-        # 如果失敗，返回簡單的歡迎頁面
-        welcome_html = """
+    """根路徑，顯示儀表板頁面（包含運行中的進程）"""
+    welcome_html = """
         <!DOCTYPE html>
         <html lang="zh-TW">
         <head>
@@ -620,18 +615,78 @@ async def root():
             <style>
                 body {
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-                    max-width: 800px;
-                    margin: 50px auto;
+                    max-width: 1400px;
+                    margin: 20px auto;
                     padding: 20px;
                     background: #f5f7fa;
                 }
                 h1 { color: #2563eb; }
+                h2 { color: #374151; margin-top: 30px; }
                 .endpoint {
                     background: white;
                     padding: 15px;
                     margin: 10px 0;
                     border-radius: 8px;
                     border-left: 4px solid #2563eb;
+                }
+                .nodes-ps {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                    gap: 15px;
+                    margin-top: 20px;
+                }
+                .node-card {
+                    background: white;
+                    padding: 15px;
+                    border-radius: 8px;
+                    border-left: 4px solid #10b981;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                }
+                .node-card.error {
+                    border-left-color: #ef4444;
+                }
+                .node-card h3 {
+                    margin: 0 0 10px 0;
+                    color: #1e40af;
+                    font-size: 16px;
+                }
+                .process-item {
+                    background: #f8f9fa;
+                    padding: 10px;
+                    margin: 8px 0;
+                    border-radius: 6px;
+                    border-left: 3px solid #3b82f6;
+                }
+                .process-item strong {
+                    color: #1e40af;
+                    display: block;
+                    margin-bottom: 5px;
+                }
+                .process-detail {
+                    font-size: 12px;
+                    color: #6b7280;
+                    margin: 3px 0;
+                }
+                .loading {
+                    color: #6b7280;
+                    font-style: italic;
+                }
+                .error-msg {
+                    color: #ef4444;
+                    font-size: 14px;
+                }
+                .refresh-btn {
+                    background: #2563eb;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-size: 14px;
+                    margin: 10px 0;
+                }
+                .refresh-btn:hover {
+                    background: #1d4ed8;
                 }
                 a {
                     color: #2563eb;
@@ -644,6 +699,22 @@ async def root():
                     padding: 2px 6px;
                     border-radius: 4px;
                     font-family: 'Monaco', 'Courier New', monospace;
+                }
+                .status-badge {
+                    display: inline-block;
+                    padding: 2px 8px;
+                    border-radius: 12px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    margin-left: 8px;
+                }
+                .status-running {
+                    background: #d1fae5;
+                    color: #065f46;
+                }
+                .status-idle {
+                    background: #f3f4f6;
+                    color: #6b7280;
                 }
             </style>
         </head>
@@ -681,10 +752,192 @@ async def root():
                 <code>GET /api/tags</code><br>
                 <code>POST /api/chat</code>
             </div>
+            
+            <h2>🔄 運行中的進程 <span id="refresh-status" style="font-size: 12px; color: #6b7280; font-weight: normal;"></span></h2>
+            <button class="refresh-btn" onclick="loadNodesPS(true)">刷新</button>
+            <div id="nodes-ps" class="nodes-ps">
+                <div class="loading">正在加載...</div>
+            </div>
+            
+            <script>
+                let isFirstLoad = true;
+                let nodeCards = {};
+                
+                function formatBytes(bytes) {
+                    if (!bytes || bytes === 0) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB', 'GB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+                }
+                
+                function formatDuration(seconds) {
+                    if (!seconds) return '0s';
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const secs = Math.floor(seconds % 60);
+                    if (hours > 0) {
+                        return `${hours}h ${minutes}m ${secs}s`;
+                    } else if (minutes > 0) {
+                        return `${minutes}m ${secs}s`;
+                    } else {
+                        return `${secs}s`;
+                    }
+                }
+                
+                function updateRefreshStatus(text) {
+                    const statusEl = document.getElementById('refresh-status');
+                    if (statusEl) {
+                        statusEl.textContent = text;
+                        setTimeout(() => {
+                            if (statusEl.textContent === text) {
+                                statusEl.textContent = '';
+                            }
+                        }, 2000);
+                    }
+                }
+                
+                function createNodeCard(nodeName, nodeData) {
+                    const card = document.createElement('div');
+                    card.className = 'node-card';
+                    card.id = `node-card-${nodeName}`;
+                    
+                    if (nodeData.error || !nodeData.ps) {
+                        card.classList.add('error');
+                        card.innerHTML = `
+                            <h3>${nodeName.toUpperCase()}</h3>
+                            <div class="error-msg">${nodeData.error || '無法獲取數據'}</div>
+                            <div class="process-detail">URL: ${nodeData.url}</div>
+                        `;
+                    } else {
+                        // 兼容兩種格式：標準的 processes 和可能的 models 格式
+                        let processes = [];
+                        if (nodeData.ps.processes) {
+                            // 標準格式：{"processes": [...]}
+                            processes = nodeData.ps.processes;
+                        } else if (nodeData.ps.models) {
+                            // 兼容格式：{"models": [...]} - 這些是已加載到內存的模型，不是運行中的進程
+                            // 將 models 轉換為顯示格式
+                            processes = nodeData.ps.models.map(model => ({
+                                model: model.name || model.model,
+                                loaded: true,
+                                size: model.size,
+                                size_vram: model.size_vram,
+                                expires_at: model.expires_at,
+                                parameter_size: model.details?.parameter_size,
+                                context_length: model.context_length
+                            }));
+                        }
+                        
+                        const statusClass = processes.length > 0 ? 'status-running' : 'status-idle';
+                        const statusText = processes.length > 0 ? `${processes.length} ${processes[0]?.loaded ? '已加載' : '運行中'}` : '空閒';
+                        
+                        let processesHTML = '';
+                        if (processes.length === 0) {
+                            processesHTML = '<div class="process-detail" style="color: #6b7280; font-style: italic;">目前沒有運行中的進程<br><small>注意：只顯示正在處理的請求，已完成的請求不會顯示</small></div>';
+                        } else {
+                            processes.forEach(proc => {
+                                if (proc.loaded) {
+                                    // 已加載的模型（不是運行中的進程）
+                                    processesHTML += `
+                                        <div class="process-item" style="border-left-color: #3b82f6;">
+                                            <strong>${proc.model || 'Unknown'}</strong>
+                                            <div class="process-detail" style="color: #6b7280; font-size: 11px;">已加載到內存（非運行中進程）</div>
+                                            ${proc.parameter_size ? `<div class="process-detail">參數大小: ${proc.parameter_size}</div>` : ''}
+                                            ${proc.size_vram ? `<div class="process-detail">VRAM 使用: ${formatBytes(proc.size_vram)}</div>` : ''}
+                                            ${proc.context_length ? `<div class="process-detail">上下文長度: ${proc.context_length.toLocaleString()}</div>` : ''}
+                                            ${proc.expires_at ? `<div class="process-detail">過期時間: ${new Date(proc.expires_at).toLocaleString()}</div>` : ''}
+                                        </div>
+                                    `;
+                                } else {
+                                    // 運行中的進程
+                                    processesHTML += `
+                                        <div class="process-item">
+                                            <strong>${proc.model || 'Unknown'}</strong>
+                                            <div class="process-detail">進程 ID: ${proc.pid || 'N/A'}</div>
+                                            <div class="process-detail">創建時間: ${proc.created_at ? new Date(proc.created_at).toLocaleString() : 'N/A'}</div>
+                                            ${proc.prompt_eval_count ? `<div class="process-detail">Prompt Tokens: ${proc.prompt_eval_count}</div>` : ''}
+                                            ${proc.eval_count ? `<div class="process-detail">Completion Tokens: ${proc.eval_count}</div>` : ''}
+                                            ${proc.total_duration ? `<div class="process-detail">總時長: ${formatDuration(proc.total_duration / 1e9)}</div>` : ''}
+                                            ${proc.load_duration ? `<div class="process-detail">加載時長: ${formatDuration(proc.load_duration / 1e9)}</div>` : ''}
+                                            ${proc.prompt_eval_duration ? `<div class="process-detail">Prompt 處理: ${formatDuration(proc.prompt_eval_duration / 1e9)}</div>` : ''}
+                                            ${proc.eval_duration ? `<div class="process-detail">生成時長: ${formatDuration(proc.eval_duration / 1e9)}</div>` : ''}
+                                        </div>
+                                    `;
+                                }
+                            });
+                        }
+                        
+                        card.innerHTML = `
+                            <h3>${nodeName.toUpperCase()} <span class="status-badge ${statusClass}">${statusText}</span></h3>
+                            <div class="process-detail" style="margin-bottom: 10px;">URL: ${nodeData.url}</div>
+                            ${processesHTML}
+                        `;
+                    }
+                    
+                    return card;
+                }
+                
+                async function loadNodesPS(manualRefresh = false) {
+                    const container = document.getElementById('nodes-ps');
+                    
+                    // 只在首次加載時顯示加載狀態
+                    if (isFirstLoad) {
+                        container.innerHTML = '<div class="loading">正在加載...</div>';
+                        isFirstLoad = false;
+                    } else if (manualRefresh) {
+                        updateRefreshStatus('刷新中...');
+                    }
+                    
+                    try {
+                        const response = await fetch('/nodes/ps');
+                        const data = await response.json();
+                        
+                        // 如果是首次加載，清空容器
+                        if (!nodeCards || Object.keys(nodeCards).length === 0) {
+                            container.innerHTML = '';
+                        }
+                        
+                        // 更新或創建每個節點的卡片
+                        for (const [nodeName, nodeData] of Object.entries(data)) {
+                            const cardId = `node-card-${nodeName}`;
+                            let card = document.getElementById(cardId);
+                            
+                            if (!card) {
+                                // 如果卡片不存在，創建新的
+                                card = createNodeCard(nodeName, nodeData);
+                                container.appendChild(card);
+                                nodeCards[nodeName] = card;
+                            } else {
+                                // 如果卡片已存在，更新內容（平滑更新）
+                                const newCard = createNodeCard(nodeName, nodeData);
+                                card.replaceWith(newCard);
+                                nodeCards[nodeName] = newCard;
+                            }
+                        }
+                        
+                        if (manualRefresh) {
+                            updateRefreshStatus('已更新');
+                        }
+                    } catch (error) {
+                        if (isFirstLoad) {
+                            container.innerHTML = `<div class="error-msg">加載失敗: ${error.message}</div>`;
+                        } else {
+                            updateRefreshStatus('刷新失敗');
+                        }
+                    }
+                }
+                
+                // 頁面加載時自動獲取
+                loadNodesPS();
+                
+                // 每 5 秒自動背景刷新（不顯示加載狀態）
+                setInterval(() => loadNodesPS(false), 5000);
+            </script>
         </body>
         </html>
         """
-        return HTMLResponse(content=welcome_html)
+    return HTMLResponse(content=welcome_html)
 
 
 # 拓撲可視化頁面（必須在通配符路由之前）
@@ -749,6 +1002,91 @@ async def get_nodes():
             for node in NODES
         ]
     }
+
+
+async def get_node_ps(node: Dict) -> Optional[Dict]:
+    """獲取節點的運行中進程信息（/api/ps）"""
+    try:
+        # 使用第一個主機名（如果有的話），否則使用 IP
+        host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
+        url = f"http://{host}:{node['port']}/api/ps"
+        print(f"Fetching /api/ps from {node['name']}: {url}")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                print(f"Got /api/ps from {node['name']}: {len(data.get('processes', []))} processes")
+                return data
+            else:
+                print(f"Failed to get /api/ps from {node['name']}: HTTP {response.status_code}")
+    except Exception as e:
+        print(f"Failed to get /api/ps from {node['name']}: {e}")
+    return None
+
+
+# 獲取所有節點的運行中進程信息
+@app.get("/nodes/ps")
+async def get_all_nodes_ps():
+    """獲取所有節點的運行中進程信息"""
+    result = {}
+    for node in NODES:
+        if node.get("enabled", True) and node_stats[node["name"]]["is_healthy"]:
+            ps_data = await get_node_ps(node)
+            # 使用主機名構建 URL（如果有的話）
+            host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
+            url = f"http://{host}:{node['port']}"
+            result[node["name"]] = {
+                "url": url,
+                "ps": ps_data,
+                "error": None if ps_data else "Failed to fetch"
+            }
+        else:
+            host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
+            url = f"http://{host}:{node['port']}"
+            result[node["name"]] = {
+                "url": url,
+                "ps": None,
+                "error": "Node is not healthy or disabled"
+            }
+    return result
+
+
+async def get_node_loaded_models(node: Dict) -> List[str]:
+    """獲取節點已加載到內存的模型列表"""
+    try:
+        # 使用第一個主機名（如果有的話），否則使用 IP
+        host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
+        url = f"http://{host}:{node['port']}/api/ps"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                # 檢查是否有 models 字段（已加載的模型）
+                if 'models' in data and isinstance(data['models'], list):
+                    return [model.get('name') or model.get('model') for model in data['models'] if model.get('name') or model.get('model')]
+    except Exception:
+        pass
+    return []
+
+
+# 獲取所有節點的已加載模型
+@app.get("/nodes/loaded-models")
+async def get_all_nodes_loaded_models():
+    """獲取所有節點已加載到內存的模型列表"""
+    result = {}
+    for node in NODES:
+        if node.get("enabled", True) and node_stats[node["name"]]["is_healthy"]:
+            models = await get_node_loaded_models(node)
+            result[node["name"]] = {
+                "models": models,
+                "count": len(models)
+            }
+        else:
+            result[node["name"]] = {
+                "models": [],
+                "count": 0
+            }
+    return result
 
 
 # Prometheus metrics端點
