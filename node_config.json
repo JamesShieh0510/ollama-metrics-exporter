@@ -1,0 +1,83 @@
+{
+  "nodes": [
+    {
+      "name": "node1",
+      "memory_gb": 128,
+      "description": "m3max-128gb",
+      "supported_model_ranges": [
+        {
+          "min_params_b": 100,
+          "max_params_b": null,
+          "description": "120B+ 大模型"
+        }
+      ]
+    },
+    {
+      "name": "node2",
+      "memory_gb": 32,
+      "description": "m1max-32gb",
+      "supported_model_ranges": [
+        {
+          "min_params_b": 30,
+          "max_params_b": 70,
+          "description": "30B~70B 中型模型"
+        }
+      ]
+    },
+    {
+      "name": "node3",
+      "memory_gb": 16,
+      "description": "m1-16gb",
+      "supported_model_ranges": [
+        {
+          "min_params_b": 1,
+          "max_params_b": 20,
+          "description": "1B~20B 小模型"
+        }
+      ]
+    },
+    {
+      "name": "node4",
+      "memory_gb": 32,
+      "description": "i7-4080-32gb",
+      "supported_model_ranges": [
+        {
+          "min_params_b": 1,
+          "max_params_b": 30,
+          "description": "1B~8B 小模型（GPU加速）"
+        }
+      ]
+    }
+  ],
+  "model_name_patterns": {
+    "120b": 120,
+    "120B": 120,
+    "70b": 70,
+    "70B": 70,
+    "65b": 65,
+    "65B": 65,
+    "34b": 34,
+    "34B": 34,
+    "32b": 32,
+    "32B": 32,
+    "30b": 30,
+    "30B": 30,
+    "13b": 13,
+    "13B": 13,
+    "8b": 8,
+    "8B": 8,
+    "7b": 7,
+    "7B": 7,
+    "3b": 3,
+    "3B": 3,
+    "1b": 1,
+    "1B": 1
+  },
+  "model_name_mapping": {
+    "qwen3-coder": 30,
+    "qwen3-coder:30b": 30,
+    "qwen3-coder:30B": 30
+  },
+  "default_model_size_b": 7
+}
+
