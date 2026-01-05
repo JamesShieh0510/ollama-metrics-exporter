@@ -488,6 +488,13 @@ async def proxy_request(request: Request, path: str):
     node_url = get_node_url(node)
     target_url = f"{node_url}{path}"
     
+    # 打印轉發信息
+    display_name = full_model_name if full_model_name else model_name
+    if display_name:
+        print(f"→ Forwarding request to {node_name} ({node_url}) for model: {display_name}")
+    else:
+        print(f"→ Forwarding request to {node_name} ({node_url}) for path: {path}")
+    
     # 更新連接數
     node_stats[node_name]["active_connections"] += 1
     active_connections.labels(node=node_name).set(node_stats[node_name]["active_connections"])
