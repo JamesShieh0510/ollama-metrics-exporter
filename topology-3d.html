@@ -40,6 +40,8 @@
             border: 1px solid #e0e0e0;
             min-width: 280px;
             z-index: 100;
+            max-height: 70vh;
+            overflow-y: auto;
         }
         
         #info-panel h2 {
@@ -237,6 +239,43 @@
                 router: 0x3b82f6,    // 藍色
                 active: 0x10b981,      // 綠色
                 idle: 0x9ca3af        // 灰色
+            },
+            // 硬件規格和IP信息
+            nodeInfo: {
+                router: {
+                    name: 'Router',
+                    ip: '192.168.50.1',
+                    hostname: 'router',
+                    spec: 'Gateway'
+                },
+                node1: {
+                    name: 'Node1',
+                    ip: '192.168.50.158',
+                    hostname: 'm3max',
+                    hostnames: ['m3max.local', 'm3max-128gb.local'],
+                    spec: 'M3 Max - 128GB'
+                },
+                node2: {
+                    name: 'Node2',
+                    ip: '192.168.50.31',
+                    hostname: 'm1max',
+                    hostnames: ['m1max.local', 'm1max-64gb.local'],
+                    spec: 'M1 Max - 64GB'
+                },
+                node3: {
+                    name: 'Node3',
+                    ip: '192.168.50.94',
+                    hostname: 'm1',
+                    hostnames: ['m1.local', 'm1-16gb.local'],
+                    spec: 'M1 - 16GB'
+                },
+                node4: {
+                    name: 'Node4',
+                    ip: '192.168.50.155',
+                    hostname: 'i7',
+                    hostnames: ['i74080.local', 'i7g13-4080-32gb.local'],
+                    spec: 'i7-4080 - 32GB'
+                }
             }
         };
         
@@ -244,6 +283,10 @@
         let scene, camera, renderer, controls;
         let nodeMeshes = {};
         let edgeLines = {};
+        let edgeLabels = {}; // 連接線上的標簽
+        let detailLabels = {}; // 詳細信息標簽（hover時顯示）
+        let raycaster, mouse;
+        let hoveredNode = null;
         let autoRotate = false;
         let previousData = {}; // 保存上一次的數據用於計算 rate
         
@@ -263,14 +306,17 @@
             camera.position.set(10, 8, 10);
             camera.lookAt(0, 0, 0);
             
-            // 創建渲染器
+            // 創建渲染器（高質量設置）
             renderer = new THREE.WebGLRenderer({
                 canvas: document.getElementById('canvas'),
-                antialias: true
+                antialias: true,
+                alpha: true,
+                powerPreference: "high-performance"
             });
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制最大DPI以避免性能問題
             renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap; // 使用軟陰影
             
             // 添加軌道控制器
             controls = new THREE.OrbitControls(camera, renderer.domElement);
@@ -278,6 +324,10 @@
             controls.dampingFactor = 0.05;
             controls.minDistance = 5;
             controls.maxDistance = 50;
+            
+            // 初始化射線檢測器（用於hover檢測）
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
             
             // 添加光源（專業網絡拓撲風格）
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -314,6 +364,193 @@
             
             // 開始動畫循環
             animate();
+        }
+        
+        // 創建文字紋理（支持多行，高質量抗鋸齒，垂直顯示）
+        function createTextTexture(lines, options = {}) {
+            // 使用高DPI來提高文字清晰度
+            const dpr = window.devicePixelRatio || 2;
+            const scale = Math.max(2, dpr); // 至少2倍分辨率
+            
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d', { 
+                alpha: true,
+                antialias: true,
+                willReadFrequently: false
+            });
+            
+            const fontSize = options.fontSize || 32;
+            const smallFontSize = options.smallFontSize || 24;
+            const fontFamily = options.fontFamily || 'Arial, sans-serif';
+            const fontWeight = options.fontWeight || 'bold';
+            const textColor = options.textColor || '#1e40af';
+            const smallTextColor = options.smallTextColor || '#6b7280';
+            const backgroundColor = options.backgroundColor || 'rgba(255, 255, 255, 0.95)';
+            const padding = options.padding || 15;
+            const lineHeight = options.lineHeight || 1.3;
+            const vertical = options.vertical !== false; // 默認垂直顯示
+            
+            // 啟用高質量文字渲染
+            context.textBaseline = 'alphabetic';
+            context.textAlign = 'center';
+            
+            if (vertical) {
+                // 垂直顯示：將文字旋轉90度
+                // 計算文字寬度和高度（使用實際字體大小）
+                context.font = `${fontWeight} ${fontSize * scale}px ${fontFamily}`;
+                let maxWidth = 0;
+                let totalHeight = 0;
+                lines.forEach((line, index) => {
+                    const font = index === 0 ? 
+                        `${fontWeight} ${fontSize * scale}px ${fontFamily}` : 
+                        `${smallFontSize * scale}px ${fontFamily}`;
+                    context.font = font;
+                    const metrics = context.measureText(line.text || line);
+                    maxWidth = Math.max(maxWidth, metrics.width);
+                    const lineHeightValue = index === 0 ? fontSize * scale : smallFontSize * scale;
+                    totalHeight += lineHeightValue * (index === 0 ? 1.1 : lineHeight);
+                });
+                
+                // 垂直顯示：寬度和高度互換
+                const canvasWidth = totalHeight + padding * 2 * scale;
+                const canvasHeight = maxWidth + padding * 2 * scale;
+                
+                // 設置高分辨率canvas
+                canvas.width = canvasWidth * 1.1;
+                canvas.height = canvasHeight * 1.1;
+                canvas.style.width = (canvas.width / scale) + 'px';
+                canvas.style.height = (canvas.height / scale) + 'px';
+                
+                // 縮放context以匹配高分辨率
+                context.scale(scale, scale);
+                
+                // 啟用抗鋸齒和文字平滑
+                context.imageSmoothingEnabled = true;
+                context.imageSmoothingQuality = 'high';
+                
+                // 繪製背景
+                if (backgroundColor) {
+                    context.fillStyle = backgroundColor;
+                    context.fillRect(0, 0, canvas.width / scale, canvas.height / scale);
+                }
+                
+                // 繪製垂直文字（多行）
+                let y = padding;
+                lines.forEach((line, index) => {
+                    const isFirstLine = index === 0;
+                    const isTitle = line.isTitle === true;
+                    const currentFontSize = (isFirstLine || isTitle) ? fontSize : smallFontSize;
+                    const font = (isFirstLine || isTitle) ? 
+                        `${fontWeight} ${fontSize}px ${fontFamily}` : 
+                        `${smallFontSize}px ${fontFamily}`;
+                    const color = (isFirstLine || isTitle) ? textColor : smallTextColor;
+                    
+                    context.save();
+                    
+                    // 移動到文字位置
+                    const centerX = canvas.width / scale / 2;
+                    context.translate(centerX, y);
+                    // 旋轉90度（順時針）
+                    context.rotate(Math.PI / 2);
+                    
+                    context.font = font;
+                    context.fillStyle = color;
+                    context.textAlign = 'center';
+                    context.textBaseline = 'middle';
+                    
+                    // 使用文字陰影來增強清晰度
+                    context.shadowColor = 'rgba(0, 0, 0, 0.1)';
+                    context.shadowBlur = 1;
+                    context.shadowOffsetX = 0.5;
+                    context.shadowOffsetY = 0.5;
+                    
+                    const text = line.text || line;
+                    context.fillText(text, 0, 0);
+                    
+                    context.restore();
+                    
+                    // 重置陰影
+                    context.shadowColor = 'transparent';
+                    context.shadowBlur = 0;
+                    context.shadowOffsetX = 0;
+                    context.shadowOffsetY = 0;
+                    
+                    if (isFirstLine || isTitle) {
+                        y += fontSize * 1.1; // 標題行間距
+                    } else {
+                        y += smallFontSize * lineHeight;
+                    }
+                });
+            } else {
+                // 水平顯示（原有邏輯）
+                context.font = `${fontWeight} ${fontSize * scale}px ${fontFamily}`;
+                let maxWidth = 0;
+                lines.forEach((line, index) => {
+                    const font = index === 0 ? 
+                        `${fontWeight} ${fontSize * scale}px ${fontFamily}` : 
+                        `${smallFontSize * scale}px ${fontFamily}`;
+                    context.font = font;
+                    const metrics = context.measureText(line.text || line);
+                    maxWidth = Math.max(maxWidth, metrics.width);
+                });
+                
+                const totalHeight = (fontSize * scale) + (lines.length - 1) * (smallFontSize * scale * lineHeight);
+                
+                canvas.width = (maxWidth + padding * 2 * scale) * 1.1;
+                canvas.height = (totalHeight + padding * 2 * scale) * 1.1;
+                canvas.style.width = (canvas.width / scale) + 'px';
+                canvas.style.height = (canvas.height / scale) + 'px';
+                
+                context.scale(scale, scale);
+                context.imageSmoothingEnabled = true;
+                context.imageSmoothingQuality = 'high';
+                
+                if (backgroundColor) {
+                    context.fillStyle = backgroundColor;
+                    context.fillRect(0, 0, canvas.width / scale, canvas.height / scale);
+                }
+                
+                let y = padding + fontSize;
+                lines.forEach((line, index) => {
+                    const isFirstLine = index === 0;
+                    const isTitle = line.isTitle === true;
+                    const font = (isFirstLine || isTitle) ? 
+                        `${fontWeight} ${fontSize}px ${fontFamily}` : 
+                        `${smallFontSize}px ${fontFamily}`;
+                    const color = (isFirstLine || isTitle) ? textColor : smallTextColor;
+                    
+                    context.font = font;
+                    context.fillStyle = color;
+                    context.textAlign = 'center';
+                    context.textBaseline = 'alphabetic';
+                    
+                    context.shadowColor = 'rgba(0, 0, 0, 0.1)';
+                    context.shadowBlur = 1;
+                    context.shadowOffsetX = 0.5;
+                    context.shadowOffsetY = 0.5;
+                    
+                    const text = line.text || line;
+                    context.fillText(text, (canvas.width / scale) / 2, y);
+                    
+                    context.shadowColor = 'transparent';
+                    context.shadowBlur = 0;
+                    context.shadowOffsetX = 0;
+                    context.shadowOffsetY = 0;
+                    
+                    if (isFirstLine || isTitle) {
+                        y += fontSize * 1.1;
+                    } else {
+                        y += smallFontSize * lineHeight;
+                    }
+                });
+            }
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.minFilter = THREE.LinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            texture.generateMipmaps = false;
+            texture.needsUpdate = true;
+            return texture;
         }
         
         // 創建節點（服務器機架風格）
@@ -355,21 +592,84 @@
                 indicator.userData.isIndicator = true;
                 mesh.add(indicator);
                 
-                // 添加標簽背景
-                const labelBgGeometry = new THREE.PlaneGeometry(1.5, 0.4);
-                const labelBgMaterial = new THREE.MeshBasicMaterial({
-                    color: 0xffffff,
-                    transparent: true,
-                    opacity: 0.9
+                // 創建簡單的節點名稱標簽（始終顯示，只顯示節點名稱）
+                const nodeInfo = CONFIG.nodeInfo[nodeName];
+                const displayName = nodeInfo ? nodeInfo.name : nodeName.toUpperCase();
+                
+                const simpleLabelTexture = createTextTexture([{ text: displayName }], {
+                    fontSize: 28,
+                    fontFamily: 'Arial, sans-serif',
+                    fontWeight: 'bold',
+                    textColor: '#1e40af',
+                    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                    padding: 8,
+                    vertical: false // 水平顯示
                 });
-                const labelBg = new THREE.Mesh(labelBgGeometry, labelBgMaterial);
-                labelBg.position.set(0, height + 0.5, 0);
-                labelBg.lookAt(camera.position);
-                mesh.add(labelBg);
+                
+                const simpleLabelMaterial = new THREE.MeshBasicMaterial({
+                    map: simpleLabelTexture,
+                    transparent: true,
+                    side: THREE.DoubleSide
+                });
+                
+                const simpleLabelGeometry = new THREE.PlaneGeometry(1.0, 0.25);
+                const simpleLabel = new THREE.Mesh(simpleLabelGeometry, simpleLabelMaterial);
+                simpleLabel.position.set(0, height + 0.35, 0);
+                simpleLabel.userData.isLabel = true;
+                mesh.add(simpleLabel);
+                
+                // 創建詳細信息標簽（hover時顯示，初始隱藏）
+                if (nodeInfo) {
+                    const detailLabelLines = [];
+                    // 第一行：IP地址（較大）
+                    detailLabelLines.push({ text: nodeInfo.ip, isTitle: true });
+                    // 第二行：硬件規格
+                    if (nodeInfo.spec) {
+                        detailLabelLines.push({ text: nodeInfo.spec, isTitle: false });
+                    }
+                    // 第三行：主機名
+                    if (nodeInfo.hostname) {
+                        detailLabelLines.push({ text: nodeInfo.hostname, isTitle: false });
+                    }
+                    
+                    const detailLabelTexture = createTextTexture(detailLabelLines, {
+                        fontSize: 22,
+                        smallFontSize: 16,
+                        fontFamily: 'Arial, sans-serif',
+                        fontWeight: 'bold',
+                        textColor: '#1e40af',
+                        smallTextColor: '#6b7280',
+                        backgroundColor: 'rgba(255, 255, 255, 0.98)',
+                        padding: 12,
+                        lineHeight: 1.3,
+                        vertical: false // 水平顯示
+                    });
+                    
+                    const detailLabelMaterial = new THREE.MeshBasicMaterial({
+                        map: detailLabelTexture,
+                        transparent: true,
+                        side: THREE.DoubleSide
+                    });
+                    
+                    const detailLabelWidth = 2.0;
+                    const detailLabelHeight = detailLabelLines.length * 0.22 + 0.2;
+                    const detailLabelGeometry = new THREE.PlaneGeometry(detailLabelWidth, detailLabelHeight);
+                    const detailLabel = new THREE.Mesh(detailLabelGeometry, detailLabelMaterial);
+                    // 將詳細標簽放在簡單標簽上方，避免重疊
+                    detailLabel.position.set(0, height + 0.35 + detailLabelHeight / 2 + 0.15, 0);
+                    detailLabel.visible = false; // 初始隱藏
+                    detailLabel.userData.isDetailLabel = true;
+                    mesh.add(detailLabel);
+                    detailLabels[nodeName] = detailLabel;
+                }
+                
+                // 添加hover檢測
+                mesh.userData.isNode = true;
+                mesh.userData.nodeName = nodeName;
             });
         }
         
-        // 創建連接線（網絡線風格）
+        // 創建連接線（網絡線風格，支持可變粗細）
         function createEdges() {
             const nodeNames = ['node1', 'node2', 'node3', 'node4'];
             
@@ -377,23 +677,66 @@
                 const sourcePos = CONFIG.nodePositions[nodeName];
                 const targetPos = CONFIG.nodePositions.router;
                 
-                const geometry = new THREE.BufferGeometry();
-                const positions = new Float32Array([
-                    sourcePos.x, 0.6, sourcePos.z,
-                    targetPos.x, 0.6, targetPos.z
-                ]);
-                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                // 計算兩點之間的距離和方向
+                const start = new THREE.Vector3(sourcePos.x, 0.6, sourcePos.z);
+                const end = new THREE.Vector3(targetPos.x, 0.6, targetPos.z);
+                const distance = start.distanceTo(end);
+                const midPoint = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
                 
-                const material = new THREE.LineBasicMaterial({
+                // 使用CylinderGeometry創建可變粗細的線條
+                const initialRadius = 0.02;
+                const cylinderGeometry = new THREE.CylinderGeometry(initialRadius, initialRadius, distance, 8);
+                
+                // 旋轉圓柱體對齊兩點
+                const direction = new THREE.Vector3().subVectors(end, start).normalize();
+                const axis = new THREE.Vector3(0, 1, 0);
+                const quaternion = new THREE.Quaternion().setFromUnitVectors(axis, direction);
+                
+                const material = new THREE.MeshStandardMaterial({
                     color: 0xf59e0b,
                     transparent: true,
                     opacity: 0.4,
-                    linewidth: 2
+                    metalness: 0.3,
+                    roughness: 0.7
                 });
                 
-                const line = new THREE.Line(geometry, material);
-                scene.add(line);
-                edgeLines[nodeName] = line;
+                const cylinder = new THREE.Mesh(cylinderGeometry, material);
+                cylinder.position.copy(midPoint);
+                cylinder.setRotationFromQuaternion(quaternion);
+                scene.add(cylinder);
+                
+                edgeLines[nodeName] = { 
+                    mesh: cylinder, 
+                    start: start, 
+                    end: end, 
+                    distance: distance,
+                    initialRadius: initialRadius 
+                };
+                
+                // 在連接線中間創建連接數標簽
+                const labelTexture = createTextTexture([{ text: '0' }], {
+                    fontSize: 20,
+                    fontFamily: 'Arial, sans-serif',
+                    fontWeight: 'bold',
+                    textColor: '#ffffff',
+                    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                    padding: 6,
+                    vertical: false // 水平顯示
+                });
+                
+                const labelMaterial = new THREE.MeshBasicMaterial({
+                    map: labelTexture,
+                    transparent: true,
+                    side: THREE.DoubleSide
+                });
+                
+                const labelGeometry = new THREE.PlaneGeometry(0.3, 0.15);
+                const label = new THREE.Mesh(labelGeometry, labelMaterial);
+                label.position.copy(midPoint);
+                label.position.y += 0.1; // 稍微抬高一點
+                label.userData.isEdgeLabel = true;
+                scene.add(label);
+                edgeLabels[nodeName] = label;
             });
         }
         
@@ -421,20 +764,47 @@
             });
         }
         
-        // 更新連接線
+        // 更新連接線（包括粗細和標簽）
         function updateEdges(data) {
             Object.keys(edgeLines).forEach(nodeName => {
-                const line = edgeLines[nodeName];
+                const edge = edgeLines[nodeName];
                 const nodeData = data[nodeName] || { connections: 0, sentRate: 0, recvRate: 0 };
                 const totalRate = (nodeData.sentRate || 0) + (nodeData.recvRate || 0);
+                const connections = nodeData.connections || 0;
                 
                 // 根據流量調整線條顏色和透明度
                 if (totalRate > 0) {
-                    line.material.color.setHex(0x10b981); // 綠色表示有流量
-                    line.material.opacity = Math.min(0.3 + totalRate / 50000, 0.9);
+                    edge.mesh.material.color.setHex(0x10b981); // 綠色表示有流量
+                    edge.mesh.material.opacity = Math.min(0.4 + totalRate / 50000, 0.9);
                 } else {
-                    line.material.color.setHex(0xf59e0b); // 橙色表示無流量
-                    line.material.opacity = 0.2;
+                    edge.mesh.material.color.setHex(0xf59e0b); // 橙色表示無流量
+                    edge.mesh.material.opacity = 0.2;
+                }
+                
+                // 根據總流量調整線條粗細（0.02 到 0.08）
+                const minRadius = 0.02;
+                const maxRadius = 0.08;
+                const rateFactor = Math.min(totalRate / 100000, 1); // 100KB/s 為最大值
+                const radius = minRadius + (maxRadius - minRadius) * rateFactor;
+                
+                // 更新圓柱體粗細
+                edge.mesh.scale.set(radius / edge.initialRadius, 1, radius / edge.initialRadius);
+                
+                // 更新連接數標簽
+                if (edgeLabels[nodeName]) {
+                    const label = edgeLabels[nodeName];
+                    const newTexture = createTextTexture([{ text: connections.toString() }], {
+                        fontSize: 20,
+                        fontFamily: 'Arial, sans-serif',
+                        fontWeight: 'bold',
+                        textColor: '#ffffff',
+                        backgroundColor: connections > 0 ? 'rgba(16, 185, 129, 0.8)' : 'rgba(0, 0, 0, 0.7)',
+                        padding: 6,
+                        vertical: false // 垂直顯示
+                    });
+                    label.material.map.dispose();
+                    label.material.map = newTexture;
+                    label.material.needsUpdate = true;
                 }
             });
         }
@@ -585,12 +955,46 @@
             nodeNames.forEach(nodeName => {
                 const nodeData = data[nodeName] || { connections: 0, sentRate: 0, recvRate: 0 };
                 const totalRate = nodeData.sentRate + nodeData.recvRate;
+                const nodeInfo = CONFIG.nodeInfo[nodeName] || {};
                 
                 const div = document.createElement('div');
                 div.className = 'node-info';
+                
+                // 構建硬件信息
+                let hardwareInfo = '';
+                if (nodeInfo.spec) {
+                    hardwareInfo = `<div class="stat" style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(0,0,0,0.1);">
+                        <span class="stat-label" style="font-size: 11px; color: #9ca3af;">硬件規格:</span>
+                        <span class="stat-value" style="font-size: 11px; color: #2563eb;">${nodeInfo.spec}</span>
+                    </div>`;
+                }
+                
+                let hostnameInfo = '';
+                if (nodeInfo.hostname) {
+                    hostnameInfo = `<div class="stat" style="font-size: 11px;">
+                        <span class="stat-label" style="color: #9ca3af;">主機名:</span>
+                        <span class="stat-value" style="color: #6b7280;">${nodeInfo.hostname}</span>
+                    </div>`;
+                }
+                
+                let hostnamesInfo = '';
+                if (nodeInfo.hostnames && nodeInfo.hostnames.length > 0) {
+                    hostnamesInfo = `<div class="stat" style="font-size: 10px; margin-top: 2px;">
+                        <span class="stat-label" style="color: #9ca3af;">別名:</span>
+                        <span class="stat-value" style="color: #6b7280; font-size: 10px;">${nodeInfo.hostnames.join(', ')}</span>
+                    </div>`;
+                }
+                
                 div.innerHTML = `
-                    <strong>${nodeName.toUpperCase()}</strong>
-                    <div class="stat">
+                    <strong>${nodeInfo.name || nodeName.toUpperCase()}</strong>
+                    ${nodeInfo.ip ? `<div class="stat" style="font-size: 11px; margin-bottom: 4px;">
+                        <span class="stat-label" style="color: #9ca3af;">IP:</span>
+                        <span class="stat-value" style="color: #2563eb; font-weight: 600;">${nodeInfo.ip}</span>
+                    </div>` : ''}
+                    ${hostnameInfo}
+                    ${hostnamesInfo}
+                    ${hardwareInfo}
+                    <div class="stat" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.1);">
                         <span class="stat-label">連接數:</span>
                         <span class="stat-value">${Math.round(nodeData.connections || 0)}</span>
                     </div>
@@ -620,6 +1024,57 @@
             return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
         }
         
+        // 更新標簽朝向（讓標簽始終面向相機）
+        function updateLabels() {
+            Object.values(nodeMeshes).forEach(mesh => {
+                const label = mesh.children.find(child => child.userData.isLabel);
+                if (label) {
+                    label.lookAt(camera.position);
+                }
+                const detailLabel = mesh.children.find(child => child.userData.isDetailLabel);
+                if (detailLabel) {
+                    detailLabel.lookAt(camera.position);
+                }
+            });
+            
+            // 更新連接線標簽朝向
+            Object.values(edgeLabels).forEach(label => {
+                label.lookAt(camera.position);
+            });
+        }
+        
+        // 處理鼠標移動（hover檢測）
+        function onMouseMove(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            // 只檢測節點本身，不包括子對象（標簽、指示燈等）
+            const nodeObjects = Object.values(nodeMeshes);
+            const intersects = raycaster.intersectObjects(nodeObjects, false);
+            
+            // 隱藏所有詳細標簽
+            Object.values(detailLabels).forEach(label => {
+                label.visible = false;
+            });
+            
+            // 顯示hover的節點的詳細標簽
+            if (intersects.length > 0) {
+                const intersected = intersects[0].object;
+                
+                // 確保是節點本身
+                if (intersected.userData.isNode) {
+                    const nodeName = intersected.userData.nodeName;
+                    if (detailLabels[nodeName]) {
+                        detailLabels[nodeName].visible = true;
+                        hoveredNode = nodeName;
+                    }
+                }
+            } else {
+                hoveredNode = null;
+            }
+        }
+        
         // 動畫循環
         function animate() {
             requestAnimationFrame(animate);
@@ -631,6 +1086,9 @@
                 camera.position.y = 8;
                 camera.lookAt(0, 0, 0);
             }
+            
+            // 更新標簽朝向
+            updateLabels();
             
             controls.update();
             renderer.render(scene, camera);
@@ -653,6 +1111,9 @@
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
+        
+        // 添加鼠標移動事件監聽
+        window.addEventListener('mousemove', onMouseMove);
         
         // 初始化
         initScene();
