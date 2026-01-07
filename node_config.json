@@ -7,7 +7,7 @@
       "supported_model_ranges": [
         {
           "min_params_b": 100,
-          "max_params_b": null,
+          "max_params_b": 10,
           "description": "120B+ 大模型"
         }
       ]
@@ -18,7 +18,7 @@
       "description": "m1max-32gb",
       "supported_model_ranges": [
         {
-          "min_params_b": 30,
+          "min_params_b": 35,
           "max_params_b": 70,
           "description": "30B~70B 中型模型"
         }
@@ -43,7 +43,7 @@
       "supported_model_ranges": [
         {
           "min_params_b": 8,
-          "max_params_b": 30,
+          "max_params_b": 34,
           "description": "8B~30B 小模型（GPU加速）"
         }
       ]

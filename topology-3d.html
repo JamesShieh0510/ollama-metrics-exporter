@@ -171,6 +171,169 @@
             margin-right: 8px;
             border: 1px solid #e0e0e0;
         }
+        
+        /* 模型列表模态框样式 */
+        #model-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        #model-modal.active {
+            display: flex;
+        }
+        
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 600px;
+            max-height: 80vh;
+            width: 90%;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+        
+        .modal-header h2 {
+            margin: 0;
+            color: #1e40af;
+            font-size: 20px;
+        }
+        
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #6b7280;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        
+        .modal-close:hover {
+            background: #f3f4f6;
+            color: #1f2937;
+        }
+        
+        .model-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        
+        .model-item {
+            padding: 16px;
+            background: #f9fafb;
+            border-radius: 8px;
+            border-left: 4px solid #2563eb;
+            transition: all 0.2s;
+        }
+        
+        .model-item:hover {
+            background: #f3f4f6;
+            transform: translateX(4px);
+        }
+        
+        .model-name {
+            font-weight: 600;
+            color: #1e40af;
+            font-size: 15px;
+            margin-bottom: 8px;
+        }
+        
+        .model-details {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            font-size: 12px;
+            color: #6b7280;
+        }
+        
+        .model-detail-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .model-detail-label {
+            color: #9ca3af;
+        }
+        
+        .model-detail-value {
+            color: #374151;
+            font-weight: 500;
+        }
+        
+        .model-status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+        
+        .model-status-badge.loaded {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        
+        .model-status-badge.not-loaded {
+            background: #f3f4f6;
+            color: #6b7280;
+        }
+        
+        .model-status-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .model-status-badge.loaded::before {
+            background: #10b981;
+        }
+        
+        .model-status-badge.not-loaded::before {
+            background: #9ca3af;
+        }
+        
+        .loading-spinner {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #9ca3af;
+        }
     </style>
 </head>
 <body>
@@ -210,6 +373,19 @@
             <div class="legend-item">
                 <div style="width: 16px; height: 2px; background: #f59e0b; margin-right: 8px; border-radius: 1px;"></div>
                 <span>網絡連接</span>
+            </div>
+        </div>
+        
+        <!-- 模型列表模态框 -->
+        <div id="model-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="modal-title">節點模型列表</h2>
+                    <button class="modal-close" onclick="closeModelModal()">&times;</button>
+                </div>
+                <div id="modal-body">
+                    <div class="loading-spinner">載入中...</div>
+                </div>
             </div>
         </div>
     </div>
@@ -1159,6 +1335,152 @@
             }
         }
         
+        // 處理鼠標點擊（顯示模型列表）
+        function onMouseClick(event) {
+            // 如果點擊的是模态框或其內容，不處理節點點擊
+            if (event.target.closest('#model-modal')) {
+                return;
+            }
+            
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const nodeObjects = Object.values(nodeMeshes);
+            const intersects = raycaster.intersectObjects(nodeObjects, false);
+            
+            if (intersects.length > 0) {
+                const intersected = intersects[0].object;
+                
+                // 確保是節點本身，且不是 router
+                if (intersected.userData.isNode) {
+                    const nodeName = intersected.userData.nodeName;
+                    if (nodeName !== 'router') {
+                        showModelModal(nodeName);
+                    }
+                }
+            }
+        }
+        
+        // 顯示模型列表模态框
+        async function showModelModal(nodeName) {
+            const modal = document.getElementById('model-modal');
+            const modalTitle = document.getElementById('modal-title');
+            const modalBody = document.getElementById('modal-body');
+            
+            const nodeInfo = CONFIG.nodeInfo[nodeName];
+            modalTitle.textContent = `${nodeInfo ? nodeInfo.name : nodeName.toUpperCase()} - 已下載模型`;
+            modalBody.innerHTML = '<div class="loading-spinner">載入中...</div>';
+            modal.classList.add('active');
+            
+            try {
+                // 同時獲取已下載模型和已加載模型
+                const [tagsResponse, loadedResponse] = await Promise.all([
+                    fetch(`/nodes/${nodeName}/tags`),
+                    fetch('/nodes/loaded-models')
+                ]);
+                
+                if (!tagsResponse.ok) throw new Error(`HTTP ${tagsResponse.status}`);
+                const tagsData = await tagsResponse.json();
+                
+                // 獲取已加載模型列表
+                let loadedModels = [];
+                if (loadedResponse.ok) {
+                    const loadedData = await loadedResponse.json();
+                    loadedModels = loadedData[nodeName]?.models || [];
+                }
+                
+                const models = tagsData.models || [];
+                
+                if (models.length === 0) {
+                    modalBody.innerHTML = '<div class="empty-state">該節點暫無已下載的模型</div>';
+                    return;
+                }
+                
+                // 格式化模型列表
+                let html = '<div class="model-list">';
+                models.forEach(model => {
+                    const name = model.name || '未知模型';
+                    const size = model.size ? formatBytes(model.size) : '未知大小';
+                    const modified = model.modified_at ? new Date(model.modified_at).toLocaleString('zh-TW') : '未知時間';
+                    const digest = model.digest ? model.digest.substring(0, 12) + '...' : '';
+                    
+                    // 檢查模型是否已加載到內存
+                    // 需要匹配模型名稱（可能包含tag，如 model:30b）
+                    const isLoaded = loadedModels.some(loadedModel => {
+                        // 完全匹配
+                        if (loadedModel === name) return true;
+                        
+                        // 提取基礎模型名稱（去掉tag）
+                        const getBaseName = (modelName) => {
+                            const parts = modelName.split(':');
+                            return parts[0];
+                        };
+                        
+                        const baseName = getBaseName(name);
+                        const loadedBaseName = getBaseName(loadedModel);
+                        
+                        // 基礎名稱匹配（例如 model 和 model:30b 視為同一模型）
+                        if (baseName === loadedBaseName && baseName !== '') {
+                            return true;
+                        }
+                        
+                        // 反向檢查：如果已加載的模型名稱包含已下載模型名稱（或反之）
+                        if (name.includes(loadedBaseName) || loadedModel.includes(baseName)) {
+                            return true;
+                        }
+                        
+                        return false;
+                    });
+                    
+                    const statusBadge = isLoaded 
+                        ? '<span class="model-status-badge loaded">已加載</span>'
+                        : '<span class="model-status-badge not-loaded">未加載</span>';
+                    
+                    html += `
+                        <div class="model-item">
+                            <div class="model-name">
+                                ${name}
+                                ${statusBadge}
+                            </div>
+                            <div class="model-details">
+                                <div class="model-detail-item">
+                                    <span class="model-detail-label">大小:</span>
+                                    <span class="model-detail-value">${size}</span>
+                                </div>
+                                <div class="model-detail-item">
+                                    <span class="model-detail-label">修改時間:</span>
+                                    <span class="model-detail-value">${modified}</span>
+                                </div>
+                                ${digest ? `<div class="model-detail-item">
+                                    <span class="model-detail-label">Digest:</span>
+                                    <span class="model-detail-value">${digest}</span>
+                                </div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+                modalBody.innerHTML = html;
+            } catch (error) {
+                console.error('獲取模型列表失敗:', error);
+                modalBody.innerHTML = `<div class="empty-state">載入失敗: ${error.message}</div>`;
+            }
+        }
+        
+        // 關閉模型列表模态框
+        function closeModelModal() {
+            const modal = document.getElementById('model-modal');
+            modal.classList.remove('active');
+        }
+        
+        // 點擊模态框外部關閉（使用事件委託，避免與 onMouseClick 衝突）
+        document.getElementById('model-modal')?.addEventListener('click', (event) => {
+            if (event.target.id === 'model-modal') {
+                closeModelModal();
+            }
+        });
+        
         // 動畫循環
         function animate() {
             requestAnimationFrame(animate);
@@ -1196,8 +1518,9 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
         
-        // 添加鼠標移動事件監聽
+        // 添加鼠標移動和點擊事件監聽
         window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('click', onMouseClick);
         
         // 初始化
         initScene();

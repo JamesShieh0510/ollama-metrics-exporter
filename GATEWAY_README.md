@@ -17,6 +17,43 @@ Ollama Gateway 是一個統一的網關服務，負責將 LLM 請求轉發到多
 
 ## 節點配置
 
+```mermaid
+graph TB
+    Client[客戶端] --> Gateway[Ollama Gateway<br/>統一網關]
+    Gateway --> Node1[Node1<br/>m3max-128GB]
+    Gateway --> Node2[Node2<br/>m1max-32GB]
+    Gateway --> Node3[Node3<br/>m1-16GB]
+    Gateway --> Node4[Node4<br/>i7-4080-32GB]
+    
+    Node1 --> Exporter1[Exporter 1]
+    Node2 --> Exporter2[Exporter 2]
+    Node3 --> Exporter3[Exporter 3]
+    Node4 --> Exporter4[Exporter 4]
+    
+    Exporter1 --> Prometheus[Prometheus]
+    Exporter2 --> Prometheus
+    Exporter3 --> Prometheus
+    Exporter4 --> Prometheus
+    Gateway --> Prometheus
+    
+    Prometheus --> Grafana[Grafana Dashboard]
+    Gateway --> Dashboard[Gateway Dashboard<br/>3D 拓撲可視化]
+
+    classDef node fill:#f9f,stroke:#333,stroke-width:2px
+    classDef gateway fill:#ff9,stroke:#333,stroke-width:2px
+    classDef exporter fill:#9ff,stroke:#333,stroke-width:2px
+    classDef prometheus fill:#9f9,stroke:#333,stroke-width:2px
+    classDef dashboard fill:#9ff,stroke:#333,stroke-width:2px
+    classDef client fill:#f99,stroke:#333,stroke-width:2px
+
+    class Node1,Node2,Node3,Node4 node
+    class Gateway gateway
+    class Exporter1,Exporter2,Exporter3,Exporter4 exporter
+    class Prometheus prometheus
+    class Dashboard,Grafana dashboard
+    class Client client
+```
+
 當前配置的節點：
 
 | 節點名 | IP地址 | 主機名 | 端口 | 權重 |

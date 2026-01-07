@@ -1089,6 +1089,37 @@ async def get_all_nodes_loaded_models():
     return result
 
 
+# 獲取單個節點的所有已下載模型（通過 /api/tags）
+async def get_node_tags(node: Dict) -> Dict:
+    """獲取節點所有已下載的模型列表（通過 /api/tags）"""
+    try:
+        host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
+        url = f"http://{host}:{node['port']}/api/tags"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"models": []}
+    except Exception as e:
+        print(f"Error fetching tags from {node['name']}: {e}")
+        return {"models": []}
+
+
+@app.get("/nodes/{node_name}/tags")
+async def get_node_tags_endpoint(node_name: str):
+    """獲取指定節點的所有已下載模型"""
+    node = next((n for n in NODES if n["name"] == node_name), None)
+    if not node:
+        raise HTTPException(status_code=404, detail=f"Node {node_name} not found")
+    
+    if not node.get("enabled", True):
+        raise HTTPException(status_code=400, detail=f"Node {node_name} is disabled")
+    
+    tags_data = await get_node_tags(node)
+    return tags_data
+
+
 # Prometheus metrics端點
 @app.get("/metrics")
 async def metrics():
