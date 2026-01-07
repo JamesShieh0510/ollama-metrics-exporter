@@ -7,7 +7,7 @@
       "supported_model_ranges": [
         {
           "min_params_b": 100,
-          "max_params_b": 10,
+          "max_params_b": null,
           "description": "120B+ 大模型"
         }
       ]
@@ -20,7 +20,7 @@
         {
           "min_params_b": 35,
           "max_params_b": 70,
-          "description": "30B~70B 中型模型"
+          "description": "35B~70B 中型模型"
         }
       ]
     },

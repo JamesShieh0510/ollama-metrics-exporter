@@ -328,18 +328,26 @@ def filter_nodes_by_model(nodes: List[Dict], model_name: Optional[str], model_si
         # 第一步：檢查節點是否有該模型
         has_model = model_name in node_models.get(node_name, set())
         if not has_model:
+            print(f"  Node {node_name} rejected: model '{model_name}' not found on node")
             continue
         
         # 第二步：檢查節點硬件是否適合該模型大小
         if not is_node_suitable_for_model(node_name, model_size_b):
+            # 獲取節點的配置範圍以便調試
+            node_cfg = node_config.get(node_name, {})
+            ranges = node_cfg.get("supported_model_ranges", [])
+            print(f"  Node {node_name} rejected: model size {model_size_b}B not in supported range {ranges}")
             continue
         
         # 第三步：檢查節點是否啟用且健康
         if not node.get("enabled", True):
+            print(f"  Node {node_name} rejected: disabled")
             continue
         if not node_stats[node_name]["is_healthy"]:
+            print(f"  Node {node_name} rejected: unhealthy")
             continue
         
+        print(f"  ✓ Node {node_name} accepted for model {model_name} ({model_size_b}B)")
         filtered.append(node)
     
     return filtered
@@ -350,11 +358,14 @@ def select_node(model_name: Optional[str] = None, model_size_b: Optional[int] = 
     # 如果提供了模型信息，先過濾節點
     candidate_nodes = NODES
     if model_name and model_size_b is not None:
+        print(f"🔍 Filtering nodes for model '{model_name}' ({model_size_b}B)...")
         candidate_nodes = filter_nodes_by_model(NODES, model_name, model_size_b)
+        print(f"   Found {len(candidate_nodes)} suitable node(s) after filtering")
         # 如果過濾後沒有節點，回退到所有節點（允許模型下載）
         if not candidate_nodes:
-            print(f"Warning: No suitable nodes found for model {model_name} ({model_size_b}B), falling back to all nodes")
+            print(f"⚠️  Warning: No suitable nodes found for model {model_name} ({model_size_b}B), falling back to all healthy nodes")
             candidate_nodes = [n for n in NODES if n.get("enabled", True) and node_stats[n["name"]]["is_healthy"]]
+            print(f"   Fallback: Using {len(candidate_nodes)} healthy node(s): {[n['name'] for n in candidate_nodes]}")
     
     # 根據調度策略選擇
     if SCHEDULING_STRATEGY == "least_connections":
