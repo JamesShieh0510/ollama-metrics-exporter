@@ -6,9 +6,9 @@
       "description": "m3max-128gb",
       "supported_model_ranges": [
         {
-          "min_params_b": 70,
+          "min_params_b": 100,
           "max_params_b": null,
-          "description": "70B+ 大模型"
+          "description": "120B+ 大模型"
         }
       ]
     },
@@ -80,3 +80,4 @@
   },
   "default_model_size_b": 7
 }
+

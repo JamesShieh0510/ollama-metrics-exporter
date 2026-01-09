@@ -26,19 +26,66 @@ node_config = {}
 model_patterns = {}
 model_name_mapping = {}
 default_model_size = 7
+config_data = {}  # 保存完整的配置數據
 
-try:
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        config_data = json.load(f)
-        node_config = {node["name"]: node for node in config_data.get("nodes", [])}
-        model_patterns = config_data.get("model_name_patterns", {})
-        model_name_mapping = config_data.get("model_name_mapping", {})
-        default_model_size = config_data.get("default_model_size_b", 7)
-    print(f"Loaded node configuration from {CONFIG_FILE}")
-except FileNotFoundError:
-    print(f"Warning: Config file {CONFIG_FILE} not found, using default configuration")
-except Exception as e:
-    print(f"Error loading config file: {e}")
+def load_config():
+    """加載節點配置文件"""
+    global node_config, model_patterns, model_name_mapping, default_model_size, config_data
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config_data = json.load(f)
+            node_config = {node["name"]: node for node in config_data.get("nodes", [])}
+            model_patterns = config_data.get("model_name_patterns", {})
+            model_name_mapping = config_data.get("model_name_mapping", {})
+            default_model_size = config_data.get("default_model_size_b", 7)
+        print(f"✅ Loaded node configuration from {CONFIG_FILE}")
+        return True
+    except FileNotFoundError:
+        print(f"⚠️  Warning: Config file {CONFIG_FILE} not found, using default configuration")
+        config_data = {
+            "nodes": [],
+            "model_name_patterns": {},
+            "model_name_mapping": {},
+            "default_model_size_b": 7
+        }
+        return False
+    except Exception as e:
+        print(f"❌ Error loading config file: {e}")
+        return False
+
+def save_config(new_config: dict) -> Tuple[bool, str]:
+    """保存節點配置文件"""
+    try:
+        # 驗證配置格式
+        if not isinstance(new_config, dict):
+            return False, "配置必須是 JSON 對象"
+        
+        # 創建備份
+        backup_file = f"{CONFIG_FILE}.backup.{int(time.time())}"
+        if os.path.exists(CONFIG_FILE):
+            import shutil
+            shutil.copy2(CONFIG_FILE, backup_file)
+            print(f"📦 Created backup: {backup_file}")
+        
+        # 保存新配置
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(new_config, f, indent=2, ensure_ascii=False)
+        
+        # 重新加載配置
+        if load_config():
+            # 打印配置摘要
+            nodes_count = len(node_config)
+            patterns_count = len(model_patterns)
+            mappings_count = len(model_name_mapping)
+            print(f"📊 配置已生效: {nodes_count} 個節點, {patterns_count} 個模式, {mappings_count} 個映射")
+            return True, f"✅ 配置已保存並立即生效（備份: {os.path.basename(backup_file)}）"
+        else:
+            return False, "配置已保存但重新加載失敗"
+    except Exception as e:
+        return False, f"保存配置時發生錯誤: {str(e)}"
+
+# 初始加載配置
+load_config()
 
 app = FastAPI(title="Ollama Gateway", version="1.0.0")
 
@@ -809,6 +856,18 @@ async def root():
             </div>
             
             <div class="endpoint">
+                <h3>🎯 <a href="/routing">模型路由查看器</a></h3>
+                <p>查看模型分配规则和查询模型会路由到哪些节点</p>
+                <code>GET /routing</code>
+            </div>
+            
+            <div class="endpoint">
+                <h3>⚙️ <a href="/config">節點配置編輯器</a></h3>
+                <p>通過網頁界面編輯 node_config.json 配置文件</p>
+                <code>GET /config</code>
+            </div>
+            
+            <div class="endpoint">
                 <h3>🔍 <a href="/health">健康檢查</a></h3>
                 <p>查看網關和節點的健康狀態</p>
                 <code>GET /health</code>
@@ -1257,6 +1316,954 @@ async def get_all_tags():
     print(f"📦 Aggregated {len(all_models_list)} unique models from all nodes")
     
     return {"models": all_models_list}
+
+
+# 模型路由查询 API
+@app.get("/api/routing/query")
+async def query_model_routing(model_name: str):
+    """查询指定模型会路由到哪些节点"""
+    try:
+        # 提取模型信息
+        full_model_name = model_name
+        if ":" in model_name:
+            base_name = model_name.split(":")[0]
+        else:
+            base_name = model_name
+        
+        # 计算模型大小
+        model_size_b = get_model_size_b(base_name, full_model_name)
+        
+        # 获取所有可能的候选节点
+        candidate_nodes = []
+        rejected_nodes = []
+        
+        for node in NODES:
+            node_name = node["name"]
+            node_info = {
+                "name": node_name,
+                "hosts": node["hosts"],
+                "port": node["port"],
+                "enabled": node.get("enabled", True),
+                "healthy": node_stats[node_name]["is_healthy"],
+                "has_model": base_name in node_models.get(node_name, set()),
+                "suitable_for_size": is_node_suitable_for_model(node_name, model_size_b),
+                "config": node_config.get(node_name, {}),
+                "reasons": []
+            }
+            
+            # 检查各种条件
+            if not node_info["enabled"]:
+                node_info["reasons"].append("节点已禁用")
+                rejected_nodes.append(node_info)
+                continue
+            
+            if not node_info["healthy"]:
+                node_info["reasons"].append("节点不健康")
+                rejected_nodes.append(node_info)
+                continue
+            
+            if not node_info["has_model"]:
+                node_info["reasons"].append(f"节点上没有模型 '{base_name}'")
+                rejected_nodes.append(node_info)
+                continue
+            
+            if not node_info["suitable_for_size"]:
+                node_cfg = node_config.get(node_name, {})
+                ranges = node_cfg.get("supported_model_ranges", [])
+                node_info["reasons"].append(f"模型大小 {model_size_b}B 不在支持范围内: {ranges}")
+                rejected_nodes.append(node_info)
+                continue
+            
+            # 所有条件都满足
+            candidate_nodes.append(node_info)
+        
+        # 如果没有候选节点，显示回退节点
+        fallback_nodes = []
+        if not candidate_nodes:
+            for node in NODES:
+                if node.get("enabled", True) and node_stats[node["name"]]["is_healthy"]:
+                    fallback_nodes.append({
+                        "name": node["name"],
+                        "hosts": node["hosts"],
+                        "port": node["port"],
+                        "reason": "回退到所有健康节点（允许模型下载）"
+                    })
+        
+        return {
+            "model_name": model_name,
+            "base_name": base_name,
+            "model_size_b": model_size_b,
+            "size_detection": {
+                "method": "从模型名称提取",
+                "patterns_matched": [p for p in model_patterns.keys() if p.lower() in model_name.lower()],
+                "mapping_matched": model_name_mapping.get(model_name) or model_name_mapping.get(base_name),
+                "default_used": model_size_b == default_model_size
+            },
+            "candidate_nodes": candidate_nodes,
+            "rejected_nodes": rejected_nodes,
+            "fallback_nodes": fallback_nodes,
+            "scheduling_strategy": SCHEDULING_STRATEGY,
+            "will_use_fallback": len(candidate_nodes) == 0
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询路由时发生错误: {str(e)}")
+
+
+@app.get("/api/routing/rules")
+async def get_routing_rules():
+    """获取所有路由规则"""
+    return {
+        "nodes": [
+            {
+                "name": node["name"],
+                "hosts": node["hosts"],
+                "port": node["port"],
+                "enabled": node.get("enabled", True),
+                "healthy": node_stats[node["name"]]["is_healthy"],
+                "config": node_config.get(node["name"], {}),
+                "available_models": list(node_models.get(node["name"], set()))
+            }
+            for node in NODES
+        ],
+        "model_patterns": model_patterns,
+        "model_mappings": model_name_mapping,
+        "default_model_size_b": default_model_size,
+        "scheduling_strategy": SCHEDULING_STRATEGY
+    }
+
+
+# 配置管理 API
+@app.get("/api/config")
+async def get_config_api():
+    """獲取當前配置"""
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Config file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading config: {str(e)}")
+
+
+@app.post("/api/config")
+async def save_config_api(request: Request):
+    """保存配置"""
+    try:
+        new_config = await request.json()
+        success, message = save_config(new_config)
+        if success:
+            return {"success": True, "message": message}
+        else:
+            raise HTTPException(status_code=400, detail=message)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving config: {str(e)}")
+
+
+@app.post("/api/config/reload")
+async def reload_config_api():
+    """重新加載配置（不保存）"""
+    success = load_config()
+    if success:
+        return {"success": True, "message": "配置已重新加載"}
+    else:
+        raise HTTPException(status_code=500, detail="重新加載配置失敗")
+
+
+# 模型路由查看器
+@app.get("/routing", response_class=HTMLResponse)
+async def routing_viewer():
+    """模型路由规则查看器"""
+    html_content = """
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型路由查看器 - Ollama Gateway</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .section h2 {
+            color: #1e40af;
+            margin-bottom: 20px;
+            font-size: 20px;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 10px;
+        }
+        .query-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .query-box input {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+        .query-box input:focus {
+            outline: none;
+            border-color: #2563eb;
+        }
+        .query-box button {
+            padding: 12px 24px;
+            background: #2563eb;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .query-box button:hover {
+            background: #1d4ed8;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 8px;
+            display: none;
+        }
+        .result.show {
+            display: block;
+        }
+        .result.success {
+            background: #d1fae5;
+            border: 2px solid #10b981;
+        }
+        .result.warning {
+            background: #fef3c7;
+            border: 2px solid #f59e0b;
+        }
+        .result.error {
+            background: #fee2e2;
+            border: 2px solid #ef4444;
+        }
+        .node-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .node-card {
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+            background: white;
+        }
+        .node-card.candidate {
+            border-color: #10b981;
+            background: #f0fdf4;
+        }
+        .node-card.rejected {
+            border-color: #ef4444;
+            background: #fef2f2;
+            opacity: 0.7;
+        }
+        .node-card.fallback {
+            border-color: #f59e0b;
+            background: #fffbeb;
+        }
+        .node-card h3 {
+            color: #1e40af;
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+        .node-card .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        .status.healthy {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .status.unhealthy {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .status.enabled {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        .status.disabled {
+            background: #f3f4f6;
+            color: #6b7280;
+        }
+        .node-card .info {
+            margin: 8px 0;
+            color: #4b5563;
+            font-size: 14px;
+        }
+        .node-card .info strong {
+            color: #1f2937;
+        }
+        .node-card .ranges {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e5e7eb;
+        }
+        .node-card .range-item {
+            background: #f8f9fa;
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .node-card .reasons {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #e5e7eb;
+        }
+        .node-card .reason {
+            color: #dc2626;
+            font-size: 13px;
+            margin: 5px 0;
+        }
+        .rules-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .rule-item {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #3b82f6;
+        }
+        .rule-item h4 {
+            color: #1e40af;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        .rule-item .pattern {
+            font-family: 'Monaco', 'Courier New', monospace;
+            background: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            margin: 2px;
+        }
+        .model-info {
+            background: #eff6ff;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        .model-info h3 {
+            color: #1e40af;
+            margin-bottom: 10px;
+        }
+        .model-info .detail {
+            margin: 5px 0;
+            color: #4b5563;
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 20px;
+            color: #2563eb;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #6b7280;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 模型路由查看器</h1>
+            <p>查看模型分配规则和查询模型会路由到哪些节点</p>
+        </div>
+        
+        <a href="/" class="back-link">← 返回首頁</a>
+        
+        <!-- 查询工具 -->
+        <div class="section">
+            <h2>🔍 模型路由查询</h2>
+            <div class="query-box">
+                <input type="text" id="modelInput" placeholder="输入模型名称，例如: qwen3-coder:30b, llama2-70b, mistral:7b-instruct" value="">
+                <button onclick="queryModel()">查询</button>
+            </div>
+            <div id="queryResult" class="result"></div>
+        </div>
+        
+        <!-- 路由规则 -->
+        <div class="section">
+            <h2>📋 节点配置和规则</h2>
+            <div id="rulesContent" class="loading">正在加载规则...</div>
+        </div>
+    </div>
+
+    <script>
+        // 查询模型路由
+        async function queryModel() {
+            const modelName = document.getElementById('modelInput').value.trim();
+            if (!modelName) {
+                alert('请输入模型名称');
+                return;
+            }
+            
+            const resultDiv = document.getElementById('queryResult');
+            resultDiv.className = 'result loading';
+            resultDiv.innerHTML = '正在查询...';
+            resultDiv.classList.add('show');
+            
+            try {
+                const response = await fetch(`/api/routing/query?model_name=${encodeURIComponent(modelName)}`);
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || '查询失败');
+                }
+                
+                displayQueryResult(data);
+            } catch (error) {
+                resultDiv.className = 'result error show';
+                resultDiv.innerHTML = `<strong>错误:</strong> ${error.message}`;
+            }
+        }
+        
+        function displayQueryResult(data) {
+            const resultDiv = document.getElementById('queryResult');
+            
+            let html = `
+                <div class="model-info">
+                    <h3>📦 模型信息: ${data.model_name}</h3>
+                    <div class="detail"><strong>基础名称:</strong> ${data.base_name}</div>
+                    <div class="detail"><strong>识别大小:</strong> ${data.model_size_b}B</div>
+                    <div class="detail"><strong>调度策略:</strong> ${data.scheduling_strategy}</div>
+                </div>
+            `;
+            
+            if (data.candidate_nodes.length > 0) {
+                resultDiv.className = 'result success show';
+                html += `<h3 style="margin-top: 20px; margin-bottom: 15px;">✅ 候选节点 (${data.candidate_nodes.length})</h3>`;
+                html += '<div class="node-grid">';
+                data.candidate_nodes.forEach(node => {
+                    html += renderNodeCard(node, 'candidate');
+                });
+                html += '</div>';
+            } else {
+                resultDiv.className = 'result warning show';
+                html += `<h3 style="margin-top: 20px; margin-bottom: 15px;">⚠️ 没有符合条件的节点</h3>`;
+                if (data.fallback_nodes.length > 0) {
+                    html += `<p style="margin-bottom: 15px;">将回退到以下健康节点（允许模型下载）:</p>`;
+                    html += '<div class="node-grid">';
+                    data.fallback_nodes.forEach(node => {
+                        html += renderNodeCard(node, 'fallback');
+                    });
+                    html += '</div>';
+                }
+            }
+            
+            if (data.rejected_nodes.length > 0) {
+                html += `<h3 style="margin-top: 20px; margin-bottom: 15px;">❌ 被拒绝的节点 (${data.rejected_nodes.length})</h3>`;
+                html += '<div class="node-grid">';
+                data.rejected_nodes.forEach(node => {
+                    html += renderNodeCard(node, 'rejected');
+                });
+                html += '</div>';
+            }
+            
+            resultDiv.innerHTML = html;
+        }
+        
+        function renderNodeCard(node, type) {
+            let html = `<div class="node-card ${type}">`;
+            html += `<h3>${node.name.toUpperCase()}</h3>`;
+            
+            if (node.enabled !== undefined) {
+                html += `<span class="status ${node.enabled ? 'enabled' : 'disabled'}">${node.enabled ? '已启用' : '已禁用'}</span> `;
+            }
+            if (node.healthy !== undefined) {
+                html += `<span class="status ${node.healthy ? 'healthy' : 'unhealthy'}">${node.healthy ? '健康' : '不健康'}</span>`;
+            }
+            
+            if (node.hosts) {
+                html += `<div class="info"><strong>地址:</strong> ${node.hosts[0]}:${node.port || 11434}</div>`;
+            }
+            
+            if (node.config && node.config.supported_model_ranges) {
+                html += '<div class="ranges"><strong>支持的模型范围:</strong>';
+                node.config.supported_model_ranges.forEach(range => {
+                    const min = range.min_params_b || 0;
+                    const max = range.max_params_b === null ? '∞' : range.max_params_b;
+                    html += `<div class="range-item">${min}B ~ ${max}B ${range.description ? '(' + range.description + ')' : ''}</div>`;
+                });
+                html += '</div>';
+            }
+            
+            if (node.has_model !== undefined) {
+                html += `<div class="info"><strong>有模型:</strong> ${node.has_model ? '✅ 是' : '❌ 否'}</div>`;
+            }
+            
+            if (node.suitable_for_size !== undefined) {
+                html += `<div class="info"><strong>大小合适:</strong> ${node.suitable_for_size ? '✅ 是' : '❌ 否'}</div>`;
+            }
+            
+            if (node.reasons && node.reasons.length > 0) {
+                html += '<div class="reasons"><strong>拒绝原因:</strong>';
+                node.reasons.forEach(reason => {
+                    html += `<div class="reason">• ${reason}</div>`;
+                });
+                html += '</div>';
+            }
+            
+            if (node.reason) {
+                html += `<div class="info" style="color: #f59e0b;"><strong>说明:</strong> ${node.reason}</div>`;
+            }
+            
+            html += '</div>';
+            return html;
+        }
+        
+        // 加载路由规则
+        async function loadRules() {
+            try {
+                const response = await fetch('/api/routing/rules');
+                const data = await response.json();
+                
+                let html = '<div class="node-grid">';
+                data.nodes.forEach(node => {
+                    html += `
+                        <div class="node-card ${node.healthy && node.enabled ? 'candidate' : 'rejected'}">
+                            <h3>${node.name.toUpperCase()}</h3>
+                            <span class="status ${node.enabled ? 'enabled' : 'disabled'}">${node.enabled ? '已启用' : '已禁用'}</span>
+                            <span class="status ${node.healthy ? 'healthy' : 'unhealthy'}">${node.healthy ? '健康' : '不健康'}</span>
+                            <div class="info"><strong>地址:</strong> ${node.hosts[0]}:${node.port}</div>
+                            ${node.config.memory_gb ? `<div class="info"><strong>内存:</strong> ${node.config.memory_gb}GB</div>` : ''}
+                            ${node.config.description ? `<div class="info"><strong>描述:</strong> ${node.config.description}</div>` : ''}
+                            ${node.config.supported_model_ranges ? `
+                                <div class="ranges">
+                                    <strong>支持的模型范围:</strong>
+                                    ${node.config.supported_model_ranges.map(range => {
+                                        const min = range.min_params_b || 0;
+                                        const max = range.max_params_b === null ? '∞' : range.max_params_b;
+                                        return `<div class="range-item">${min}B ~ ${max}B ${range.description ? '(' + range.description + ')' : ''}</div>`;
+                                    }).join('')}
+                                </div>
+                            ` : ''}
+                            ${node.available_models.length > 0 ? `
+                                <div class="info" style="margin-top: 10px;">
+                                    <strong>可用模型 (${node.available_models.length}):</strong><br>
+                                    <small style="color: #6b7280;">${node.available_models.slice(0, 5).join(', ')}${node.available_models.length > 5 ? '...' : ''}</small>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                });
+                html += '</div>';
+                
+                html += '<h2 style="margin-top: 30px;">🔤 模型名称模式匹配</h2>';
+                html += '<div class="rules-grid">';
+                Object.entries(data.model_patterns).forEach(([pattern, size]) => {
+                    html += `
+                        <div class="rule-item">
+                            <h4>模式: <span class="pattern">${pattern}</span></h4>
+                            <div>识别为: <strong>${size}B</strong></div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+                
+                if (Object.keys(data.model_mappings).length > 0) {
+                    html += '<h2 style="margin-top: 30px;">🗺️ 模型名称映射</h2>';
+                    html += '<div class="rules-grid">';
+                    Object.entries(data.model_mappings).forEach(([name, size]) => {
+                        html += `
+                            <div class="rule-item">
+                                <h4>模型: <span class="pattern">${name}</span></h4>
+                                <div>映射为: <strong>${size}B</strong></div>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                }
+                
+                html += `<div style="margin-top: 20px; padding: 15px; background: #eff6ff; border-radius: 8px;">
+                    <strong>默认模型大小:</strong> ${data.default_model_size_b}B<br>
+                    <strong>调度策略:</strong> ${data.scheduling_strategy}
+                </div>`;
+                
+                document.getElementById('rulesContent').innerHTML = html;
+            } catch (error) {
+                document.getElementById('rulesContent').innerHTML = `<div class="result error show">加载失败: ${error.message}</div>`;
+            }
+        }
+        
+        // 页面加载时自动加载规则
+        window.addEventListener('DOMContentLoaded', () => {
+            loadRules();
+        });
+        
+        // 支持 Enter 键查询
+        document.getElementById('modelInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                queryModel();
+            }
+        });
+    </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
+
+
+# 配置編輯頁面
+@app.get("/config", response_class=HTMLResponse)
+async def config_editor():
+    """配置編輯器頁面"""
+    html_content = """
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>節點配置編輯器 - Ollama Gateway</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        .header p {
+            opacity: 0.9;
+        }
+        .toolbar {
+            padding: 20px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+        .btn-success {
+            background: #10b981;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #059669;
+        }
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #4b5563;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .content {
+            padding: 30px;
+        }
+        .editor-container {
+            position: relative;
+        }
+        #configEditor {
+            width: 100%;
+            min-height: 600px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            padding: 20px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            resize: vertical;
+            tab-size: 2;
+        }
+        #configEditor:focus {
+            outline: none;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+        .status {
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 6px;
+            display: none;
+        }
+        .status.success {
+            background: #d1fae5;
+            color: #065f46;
+            border: 1px solid #10b981;
+        }
+        .status.error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #ef4444;
+        }
+        .status.info {
+            background: #dbeafe;
+            color: #1e40af;
+            border: 1px solid #3b82f6;
+        }
+        .status.show {
+            display: block;
+        }
+        .help-text {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border-left: 4px solid #3b82f6;
+        }
+        .help-text h3 {
+            margin-bottom: 10px;
+            color: #1e40af;
+        }
+        .help-text ul {
+            margin-left: 20px;
+            color: #4b5563;
+        }
+        .help-text li {
+            margin: 5px 0;
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 20px;
+            color: #2563eb;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚙️ 節點配置編輯器</h1>
+            <p>編輯 node_config.json 配置文件</p>
+        </div>
+        <div class="toolbar">
+            <a href="/" class="btn btn-secondary">← 返回首頁</a>
+            <button class="btn btn-primary" onclick="loadConfig()">🔄 重新載入</button>
+            <button class="btn btn-success" onclick="saveConfig()">💾 保存配置</button>
+            <button class="btn btn-secondary" onclick="formatJSON()">✨ 格式化 JSON</button>
+            <button class="btn btn-secondary" onclick="validateJSON()">✓ 驗證 JSON</button>
+        </div>
+        <div class="content">
+            <div class="editor-container">
+                <textarea id="configEditor" spellcheck="false"></textarea>
+            </div>
+            <div id="status" class="status"></div>
+            <div class="help-text">
+                <h3>📖 使用說明</h3>
+                <ul>
+                    <li><strong>重新載入</strong>：從文件重新讀取當前配置（會丟棄未保存的修改）</li>
+                    <li><strong>保存配置</strong>：保存當前編輯的配置到文件並<strong>立即生效</strong>（無需重啟服務）</li>
+                    <li><strong>格式化 JSON</strong>：自動格式化 JSON 代碼，使其更易讀</li>
+                    <li><strong>驗證 JSON</strong>：檢查 JSON 語法是否正確</li>
+                    <li>保存前會自動創建備份文件（格式：node_config.json.backup.時間戳）</li>
+                    <li><strong>配置會立即生效</strong>：保存後新的請求會自動使用新配置進行節點選擇</li>
+                    <li>支持 Ctrl+S (Windows/Linux) 或 Cmd+S (Mac) 快捷鍵保存</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let originalConfig = '';
+
+        async function loadConfig() {
+            const editor = document.getElementById('configEditor');
+            const status = document.getElementById('status');
+            
+            try {
+                showStatus('正在載入配置...', 'info');
+                const response = await fetch('/api/config');
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || '載入配置失敗');
+                }
+                const config = await response.json();
+                originalConfig = JSON.stringify(config, null, 2);
+                editor.value = originalConfig;
+                showStatus('配置已載入', 'success');
+            } catch (error) {
+                showStatus('載入配置失敗: ' + error.message, 'error');
+            }
+        }
+
+        async function saveConfig() {
+            const editor = document.getElementById('configEditor');
+            const configText = editor.value.trim();
+            
+            // 驗證 JSON
+            let config;
+            try {
+                config = JSON.parse(configText);
+            } catch (error) {
+                showStatus('JSON 格式錯誤: ' + error.message, 'error');
+                return;
+            }
+            
+            try {
+                showStatus('正在保存配置...', 'info');
+                const response = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: configText
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    originalConfig = configText;
+                    showStatus(result.message || '配置已保存並重新加載', 'success');
+                } else {
+                    showStatus('保存失敗: ' + (result.detail || result.message || '未知錯誤'), 'error');
+                }
+            } catch (error) {
+                showStatus('保存配置時發生錯誤: ' + error.message, 'error');
+            }
+        }
+
+        function formatJSON() {
+            const editor = document.getElementById('configEditor');
+            
+            try {
+                const config = JSON.parse(editor.value);
+                const formatted = JSON.stringify(config, null, 2);
+                editor.value = formatted;
+                showStatus('JSON 已格式化', 'success');
+            } catch (error) {
+                showStatus('JSON 格式錯誤，無法格式化: ' + error.message, 'error');
+            }
+        }
+
+        function validateJSON() {
+            const editor = document.getElementById('configEditor');
+            
+            try {
+                JSON.parse(editor.value);
+                showStatus('✓ JSON 格式正確', 'success');
+            } catch (error) {
+                showStatus('✗ JSON 格式錯誤: ' + error.message, 'error');
+            }
+        }
+
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status ' + type + ' show';
+            
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    status.classList.remove('show');
+                }, 3000);
+            }
+        }
+
+        // 頁面加載時自動載入配置
+        window.addEventListener('DOMContentLoaded', () => {
+            loadConfig();
+        });
+
+        // 監聽 Ctrl+S 快捷鍵保存
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                saveConfig();
+            }
+        });
+    </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 # Prometheus metrics端點

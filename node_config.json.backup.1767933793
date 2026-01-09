@@ -8,7 +8,7 @@
         {
           "min_params_b": 70,
           "max_params_b": null,
-          "description": "70B+ 大模型"
+          "description": "120B+ 大模型"
         }
       ]
     },
