@@ -462,6 +462,18 @@ async def shutdown_event():
 
 async def proxy_request(request: Request, path: str):
     """代理請求到選定的節點"""
+    # 處理 OPTIONS 請求（CORS preflight）- 直接返回，不轉發到後端
+    if request.method == "OPTIONS":
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "3600",
+            }
+        )
+    
     # 先讀取請求體（用於提取模型信息）
     body_bytes = b""
     if request.method == "POST":
@@ -520,6 +532,9 @@ async def proxy_request(request: Request, path: str):
         # 移除可能導致問題的headers
         headers.pop("host", None)
         headers.pop("content-length", None)
+        headers.pop("connection", None)
+        headers.pop("keep-alive", None)
+        headers.pop("transfer-encoding", None)
         
         # 使用之前讀取的body
         body = body_bytes
@@ -527,13 +542,17 @@ async def proxy_request(request: Request, path: str):
         # 轉發請求
         params = dict(request.query_params)
         
-        response = await client.request(
-            method=method,
-            url=target_url,
-            headers=headers,
-            content=body,
-            params=params,
-        )
+        try:
+            response = await client.request(
+                method=method,
+                url=target_url,
+                headers=headers,
+                content=body,
+                params=params,
+            )
+        except httpx.RequestError as e:
+            print(f"❌ Request error to {node_name} ({target_url}): {e}")
+            raise
         
         status_code = response.status_code
         node_stats[node_name]["total_requests"] += 1
@@ -553,6 +572,17 @@ async def proxy_request(request: Request, path: str):
             node=node_name
         ).observe(duration)
         
+        # 過濾響應頭，移除不應該傳遞的headers
+        response_headers = {}
+        skip_headers = {
+            "content-length", "transfer-encoding", "connection", 
+            "keep-alive", "proxy-authenticate", "proxy-authorization",
+            "te", "trailer", "upgrade"
+        }
+        for key, value in response.headers.items():
+            if key.lower() not in skip_headers:
+                response_headers[key] = value
+        
         # 如果是流式響應
         if "text/event-stream" in response.headers.get("content-type", ""):
             async def generate():
@@ -566,7 +596,7 @@ async def proxy_request(request: Request, path: str):
             return StreamingResponse(
                 generate(),
                 status_code=status_code,
-                headers=dict(response.headers),
+                headers=response_headers,
                 media_type=response.headers.get("content-type", "text/event-stream")
             )
         else:
@@ -575,11 +605,14 @@ async def proxy_request(request: Request, path: str):
             node_stats[node_name]["active_connections"] -= 1
             active_connections.labels(node=node_name).set(node_stats[node_name]["active_connections"])
             
+            # 確保 content-type 正確設置
+            content_type = response.headers.get("content-type", "application/json")
+            
             return Response(
                 content=content,
                 status_code=status_code,
-                headers=dict(response.headers),
-                media_type=response.headers.get("content-type", "application/json")
+                headers=response_headers,
+                media_type=content_type
             )
     
     except httpx.TimeoutException:
@@ -608,8 +641,15 @@ async def proxy_request(request: Request, path: str):
             status="error"
         ).inc()
         
-        print(f"Error proxying to {node_name}: {e}")
-        raise HTTPException(status_code=502, detail=f"Error proxying to {node_name}: {str(e)}")
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"❌ Error proxying to {node_name} ({target_url}): {e}")
+        print(f"   Path: {path}, Method: {method}")
+        print(f"   Error details: {error_details}")
+        raise HTTPException(
+            status_code=502, 
+            detail=f"Error proxying to {node_name}: {str(e)}"
+        )
 
 
 # 根路徑顯示儀表板（包含運行中的進程）（必須在通配符路由之前）
