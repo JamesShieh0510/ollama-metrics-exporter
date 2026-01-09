@@ -382,7 +382,7 @@ def get_node_url(node: Dict) -> str:
 
 
 async def get_node_models(node: Dict) -> Set[str]:
-    """獲取節點上已下載的模型列表"""
+    """獲取節點上已下載的模型列表（只返回模型名，不含tag）"""
     try:
         url = f"{get_node_url(node)}/api/tags"
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
@@ -392,13 +392,17 @@ async def get_node_models(node: Dict) -> Set[str]:
                 models = set()
                 for model_info in data.get("models", []):
                     model_name = model_info.get("name", "")
-                    # 移除版本標籤，只保留模型名
+                    if not model_name:
+                        continue
+                    # 移除版本標籤，只保留模型名（用於節點過濾）
+                    # 例如 "qwen2.5-coder:30b" -> "qwen2.5-coder"
                     if ":" in model_name:
                         model_name = model_name.split(":")[0]
                     models.add(model_name)
+                print(f"  ✓ {node['name']}: Found {len(models)} models: {sorted(models)}")
                 return models
     except Exception as e:
-        print(f"Failed to get models from {node['name']}: {e}")
+        print(f"  ❌ Failed to get models from {node['name']}: {e}")
     return set()
 
 
@@ -415,13 +419,18 @@ async def health_check_node(node: Dict) -> bool:
             
             # 同步模型列表
             if is_healthy:
+                print(f"🔄 Syncing models from {node['name']}...")
                 models = await get_node_models(node)
+                old_count = len(node_models.get(node["name"], set()))
                 node_models[node["name"]] = models
+                new_count = len(models)
                 node_stats[node["name"]]["last_model_sync"] = time.time()
+                if old_count != new_count:
+                    print(f"  📊 {node['name']}: Model count changed from {old_count} to {new_count}")
             
             return is_healthy
     except Exception as e:
-        print(f"Health check failed for {node['name']}: {e}")
+        print(f"❌ Health check failed for {node['name']}: {e}")
         node_stats[node["name"]]["is_healthy"] = False
         node_stats[node["name"]]["last_health_check"] = time.time()
         node_health.labels(node=node["name"]).set(0)
@@ -440,6 +449,8 @@ async def periodic_health_check():
 @app.on_event("startup")
 async def startup_event():
     """啟動時初始化"""
+    print("🚀 Starting Ollama Gateway...")
+    
     # 初始化metrics
     for node in NODES:
         active_connections.labels(node=node["name"]).set(0)
@@ -448,10 +459,18 @@ async def startup_event():
     # 啟動健康檢查任務
     asyncio.create_task(periodic_health_check())
     
-    # 立即執行一次健康檢查
+    # 立即執行一次健康檢查和模型同步
+    print("🔄 Performing initial health check and model sync...")
     for node in NODES:
         if node.get("enabled", True):
             await health_check_node(node)
+    
+    # 打印初始模型統計
+    total_models = sum(len(models) for models in node_models.values())
+    print(f"✅ Gateway started. Total unique models across all nodes: {total_models}")
+    for node_name, models in node_models.items():
+        if models:
+            print(f"   {node_name}: {len(models)} models")
 
 
 @app.on_event("shutdown")
@@ -487,6 +506,13 @@ async def proxy_request(request: Request, path: str):
     full_model_name = None
     model_size_b = None
     
+    # 特殊處理：/api/tags 請求應該已經被上面的路由處理了，這裡不應該到達
+    # 但為了安全，我們還是檢查一下
+    if path == "/api/tags" or path == "api/tags":
+        # 這不應該發生，因為 /api/tags 已經有專門的路由
+        # 但如果到達這裡，我們返回所有節點的聚合列表
+        pass
+    
     # 先從查詢參數獲取
     full_model_name = request.query_params.get("model")
     if full_model_name:
@@ -500,9 +526,13 @@ async def proxy_request(request: Request, path: str):
     if model_name:
         model_size_b = get_model_size_b(model_name, full_model_name)
         display_name = full_model_name if full_model_name else model_name
-        print(f"Request for model: {display_name} ({model_size_b}B)")
+        print(f"📝 Request for model: {display_name} ({model_size_b}B)")
+    else:
+        # 沒有模型名稱的請求（如 /api/tags, /api/version 等）
+        print(f"📝 Request without model: {path}")
     
     # 選擇節點（基於模型信息）
+    # 如果沒有模型名稱，select_node 會返回所有健康節點
     node = select_node(model_name, model_size_b)
     if not node:
         raise HTTPException(status_code=503, detail="No healthy nodes available")
@@ -1169,6 +1199,64 @@ async def get_node_tags_endpoint(node_name: str):
     
     tags_data = await get_node_tags(node)
     return tags_data
+
+
+# 聚合所有節點的模型列表（必須在通配符路由之前）
+@app.get("/api/tags")
+async def get_all_tags():
+    """聚合所有節點的模型列表，返回統一的模型列表"""
+    all_models = {}  # 使用字典來去重，key 是模型名，value 是模型信息
+    all_models_list = []  # 最終返回的模型列表
+    
+    # 從所有健康節點獲取模型列表
+    for node in NODES:
+        if node.get("enabled", True) and node_stats[node["name"]]["is_healthy"]:
+            try:
+                tags_data = await get_node_tags(node)
+                models = tags_data.get("models", [])
+                
+                for model_info in models:
+                    model_name = model_info.get("name", "")
+                    if not model_name:
+                        continue
+                    
+                    # 如果模型不存在，或當前節點的模型信息更完整（有更多字段），則更新
+                    if model_name not in all_models:
+                        all_models[model_name] = model_info.copy()
+                        # 添加節點信息，標記該模型在哪些節點可用
+                        all_models[model_name]["_available_on_nodes"] = [node["name"]]
+                    else:
+                        # 模型已存在，添加節點信息
+                        if node["name"] not in all_models[model_name].get("_available_on_nodes", []):
+                            all_models[model_name]["_available_on_nodes"].append(node["name"])
+                        
+                        # 如果當前節點的模型信息更完整（有 size, modified_at 等），則更新
+                        current_model = all_models[model_name]
+                        if not current_model.get("size") and model_info.get("size"):
+                            current_model["size"] = model_info["size"]
+                        if not current_model.get("modified_at") and model_info.get("modified_at"):
+                            current_model["modified_at"] = model_info["modified_at"]
+                        if not current_model.get("digest") and model_info.get("digest"):
+                            current_model["digest"] = model_info["digest"]
+            except Exception as e:
+                print(f"Error fetching tags from {node['name']} for aggregation: {e}")
+                continue
+    
+    # 轉換為列表格式，移除內部使用的 _available_on_nodes 字段（或保留作為額外信息）
+    for model_name, model_info in all_models.items():
+        model_data = model_info.copy()
+        # 可選：保留節點信息作為額外字段（如果客戶端需要知道模型在哪個節點）
+        # model_data["available_on_nodes"] = model_data.pop("_available_on_nodes", [])
+        # 或者移除內部字段，保持與 Ollama API 兼容
+        model_data.pop("_available_on_nodes", None)
+        all_models_list.append(model_data)
+    
+    # 按模型名稱排序
+    all_models_list.sort(key=lambda x: x.get("name", ""))
+    
+    print(f"📦 Aggregated {len(all_models_list)} unique models from all nodes")
+    
+    return {"models": all_models_list}
 
 
 # Prometheus metrics端點
