@@ -28,17 +28,117 @@ model_name_mapping = {}
 default_model_size = 7
 config_data = {}  # 保存完整的配置數據
 
+def resolve_env_var(value: str) -> str:
+    """解析環境變量引用，支持 ${VAR} 格式"""
+    if not isinstance(value, str):
+        return value
+    # 匹配 ${VAR} 格式
+    pattern = r'\$\{([^}]+)\}'
+    def replace_var(match):
+        var_name = match.group(1)
+        return os.getenv(var_name, match.group(0))  # 如果環境變量不存在，返回原字符串
+    return re.sub(pattern, replace_var, value)
+
+def resolve_config_values(config: Dict) -> Dict:
+    """遞歸解析配置中的環境變量引用"""
+    if isinstance(config, dict):
+        return {k: resolve_config_values(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        return [resolve_config_values(item) for item in config]
+    elif isinstance(config, str):
+        return resolve_env_var(config)
+    else:
+        return config
+
 def load_config():
     """加載節點配置文件"""
-    global node_config, model_patterns, model_name_mapping, default_model_size, config_data
+    global node_config, model_patterns, model_name_mapping, default_model_size, config_data, NODES
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             config_data = json.load(f)
+            # 解析環境變量引用
+            config_data = resolve_config_values(config_data)
+            
             node_config = {node["name"]: node for node in config_data.get("nodes", [])}
             model_patterns = config_data.get("model_name_patterns", {})
             model_name_mapping = config_data.get("model_name_mapping", {})
             default_model_size = config_data.get("default_model_size_b", 7)
+            
+            # 從配置文件構建 NODES 列表
+            NODES.clear()
+            for node_cfg in config_data.get("nodes", []):
+                node_type = node_cfg.get("type", "local")
+                if node_type == "external":
+                    # 外部節點
+                    node = {
+                        "name": node_cfg["name"],
+                        "type": "external",
+                        "api_url": node_cfg.get("api_url"),
+                        "api_key": node_cfg.get("api_key", ""),
+                        "timeout_seconds": node_cfg.get("timeout_seconds", 300),
+                        "headers": node_cfg.get("headers", {}),
+                        "weight": 1.0,
+                        "enabled": node_cfg.get("enabled", True),
+                        "config": node_cfg,  # 保存完整配置
+                    }
+                else:
+                    # 本地節點（保持向後兼容，如果配置文件中沒有 hosts，使用硬編碼的默認值）
+                    # 默認節點配置（根據 GATEWAY_README.md）
+                    default_hosts = {
+                        "node1": ["192.168.50.158", "m3max", "m3max.local", "m3max-128gb.local"],
+                        "node2": ["192.168.50.31", "m1max", "m1max.local", "m1max-64gb.local"],
+                        "node3": ["192.168.50.94", "m1", "m1.local", "m1-16gb.local"],
+                        "node4": ["192.168.50.155", "i7", "i74080.local", "i7g13-4080-32gb.local"],
+                    }
+                    
+                    node_name = node_cfg["name"]
+                    hosts = node_cfg.get("hosts", default_hosts.get(node_name, []))
+                    
+                    node = {
+                        "name": node_name,
+                        "type": "local",
+                        "hosts": hosts,
+                        "port": node_cfg.get("port", 11434),
+                        "weight": node_cfg.get("weight", 1.0),
+                        "enabled": node_cfg.get("enabled", True),
+                        "config": node_cfg,
+                    }
+                NODES.append(node)
+            
+            # 重新初始化節點狀態（只為新節點）
+            for node in NODES:
+                if node["name"] not in node_stats:
+                    node_stats[node["name"]] = {
+                        "active_connections": 0,
+                        "total_requests": 0,
+                        "failed_requests": 0,
+                        "last_health_check": None,
+                        "is_healthy": True,
+                        "current_weight": node["weight"],
+                        "effective_weight": node["weight"],
+                        "last_model_sync": None,
+                    }
+                    node_models[node["name"]] = set()
+                else:
+                    # 更新現有節點的權重
+                    node_stats[node["name"]]["current_weight"] = node["weight"]
+                    node_stats[node["name"]]["effective_weight"] = node["weight"]
+            
+            # 移除已刪除的節點
+            node_names = {node["name"] for node in NODES}
+            for node_name in list(node_stats.keys()):
+                if node_name not in node_names:
+                    del node_stats[node_name]
+                    del node_models[node_name]
+            
         print(f"✅ Loaded node configuration from {CONFIG_FILE}")
+        local_nodes = sum(1 for n in NODES if n.get("type") == "local")
+        external_nodes = sum(1 for n in NODES if n.get("type") == "external")
+        print(f"   📊 {len(NODES)} nodes total: {local_nodes} local, {external_nodes} external")
+        if len(NODES) > 0:
+            print(f"   📋 Node names: {[n['name'] for n in NODES]}")
+        else:
+            print(f"   ⚠️  WARNING: NODES list is empty after loading config!")
         return True
     except FileNotFoundError:
         print(f"⚠️  Warning: Config file {CONFIG_FILE} not found, using default configuration")
@@ -48,9 +148,13 @@ def load_config():
             "model_name_mapping": {},
             "default_model_size_b": 7
         }
+        NODES.clear()  # 確保清空
         return False
     except Exception as e:
         print(f"❌ Error loading config file: {e}")
+        import traceback
+        traceback.print_exc()
+        NODES.clear()  # 確保清空
         return False
 
 def save_config(new_config: dict) -> Tuple[bool, str]:
@@ -83,6 +187,9 @@ def save_config(new_config: dict) -> Tuple[bool, str]:
             return False, "配置已保存但重新加載失敗"
     except Exception as e:
         return False, f"保存配置時發生錯誤: {str(e)}"
+
+# 節點配置（將從配置文件動態加載，必須在 load_config() 之前定義）
+NODES: List[Dict] = []
 
 # 初始加載配置
 load_config()
@@ -123,56 +230,12 @@ node_health = Gauge(
     ["node"]
 )
 
-# 節點配置
-NODES = [
-    {
-        "name": "node1",
-        "hosts": ["192.168.50.158", "m3max", "m3max.local", "m3max-128gb.local"],
-        "port": 11434,
-        "weight": 1.0,  # 負載均衡權重
-        "enabled": True,
-    },
-    {
-        "name": "node2",
-        "hosts": ["192.168.50.31", "m1max", "m1max.local", "m1max-64gb.local"],
-        "port": 11434,
-        "weight": 1.0,
-        "enabled": True,
-    },
-    {
-        "name": "node3",
-        "hosts": ["192.168.50.94", "m1", "m1.local", "m1-16gb.local"],
-        "port": 11434,
-        "weight": 1.0,
-        "enabled": True,
-    },
-    {
-        "name": "node4",
-        "hosts": ["192.168.50.155", "i7", "i74080.local", "i7g13-4080-32gb.local"],
-        "port": 11434,
-        "weight": 1.0,
-        "enabled": True,
-    },
-]
-
 # 調度策略類型
 SCHEDULING_STRATEGY = os.getenv("SCHEDULING_STRATEGY", "round_robin")  # round_robin, least_connections, weighted_round_robin
 
 # 節點狀態追蹤
 node_stats: Dict[str, Dict] = {}
 node_models: Dict[str, Set[str]] = {}  # 每個節點上已下載的模型列表
-for node in NODES:
-    node_stats[node["name"]] = {
-        "active_connections": 0,
-        "total_requests": 0,
-        "failed_requests": 0,
-        "last_health_check": None,
-        "is_healthy": True,
-        "current_weight": node["weight"],
-        "effective_weight": node["weight"],
-        "last_model_sync": None,
-    }
-    node_models[node["name"]] = set()
 
 # 輪詢索引
 round_robin_index = 0
@@ -424,16 +487,56 @@ def select_node(model_name: Optional[str] = None, model_size_b: Optional[int] = 
 
 
 def get_node_url(node: Dict) -> str:
-    """獲取節點的完整URL（使用第一個host）"""
-    return f"http://{node['hosts'][0]}:{node['port']}"
+    """獲取節點的完整URL"""
+    node_type = node.get("type", "local")
+    if node_type == "external":
+        # 外部節點使用 api_url
+        api_url = node.get("api_url", "")
+        # 確保 URL 以 / 結尾（如果需要的話）
+        if api_url and not api_url.endswith("/"):
+            return api_url
+        return api_url
+    else:
+        # 本地節點使用 hosts 和 port
+        hosts = node.get("hosts", [])
+        if not hosts:
+            raise ValueError(f"Local node {node.get('name')} has no hosts configured")
+        port = node.get("port", 11434)
+        return f"http://{hosts[0]}:{port}"
 
+
+def get_node_headers(node: Dict) -> Dict[str, str]:
+    """獲取節點的請求頭（包括 API key）"""
+    headers = {}
+    node_type = node.get("type", "local")
+    
+    if node_type == "external":
+        # 外部節點：添加配置的 headers
+        config_headers = node.get("headers", {})
+        headers.update(config_headers)
+        
+        # 如果有 api_key，添加到 Authorization header（如果還沒有設置）
+        api_key = node.get("api_key", "")
+        if api_key and "Authorization" not in headers:
+            headers["Authorization"] = f"Bearer {api_key}"
+    
+    return headers
 
 async def get_node_models(node: Dict) -> Set[str]:
     """獲取節點上已下載的模型列表（只返回模型名，不含tag）"""
     try:
-        url = f"{get_node_url(node)}/api/tags"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            response = await client.get(url)
+        base_url = get_node_url(node)
+        url = f"{base_url}/api/tags"
+        
+        # 構建請求頭
+        headers = get_node_headers(node)
+        
+        # 設置超時
+        timeout_seconds = node.get("timeout_seconds", 5.0) if node.get("type") == "external" else 5.0
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
             if response.status_code == 200:
                 data = response.json()
                 models = set()
@@ -456,9 +559,18 @@ async def get_node_models(node: Dict) -> Set[str]:
 async def health_check_node(node: Dict) -> bool:
     """健康檢查節點並同步模型列表"""
     try:
-        url = f"{get_node_url(node)}/api/tags"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            response = await client.get(url)
+        base_url = get_node_url(node)
+        url = f"{base_url}/api/tags"
+        
+        # 構建請求頭
+        headers = get_node_headers(node)
+        
+        # 設置超時
+        timeout_seconds = node.get("timeout_seconds", 5.0) if node.get("type") == "external" else 5.0
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
             is_healthy = response.status_code == 200
             node_stats[node["name"]]["is_healthy"] = is_healthy
             node_stats[node["name"]]["last_health_check"] = time.time()
@@ -613,20 +725,39 @@ async def proxy_request(request: Request, path: str):
         headers.pop("keep-alive", None)
         headers.pop("transfer-encoding", None)
         
+        # 如果是外部節點，添加節點的 headers（包括 API key）
+        node_headers = get_node_headers(node)
+        headers.update(node_headers)
+        
         # 使用之前讀取的body
         body = body_bytes
         
         # 轉發請求
         params = dict(request.query_params)
         
+        # 設置超時（外部節點可能有不同的超時設置）
+        timeout_seconds = node.get("timeout_seconds", 300.0) if node.get("type") == "external" else 300.0
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+        
         try:
-            response = await client.request(
-                method=method,
-                url=target_url,
-                headers=headers,
-                content=body,
-                params=params,
-            )
+            # 為外部節點創建新的客戶端（使用自定義超時），本地節點使用全局客戶端
+            if node.get("type") == "external":
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as external_client:
+                    response = await external_client.request(
+                        method=method,
+                        url=target_url,
+                        headers=headers,
+                        content=body,
+                        params=params,
+                    )
+            else:
+                response = await client.request(
+                    method=method,
+                    url=target_url,
+                    headers=headers,
+                    content=body,
+                    params=params,
+                )
         except httpx.RequestError as e:
             print(f"❌ Request error to {node_name} ({target_url}): {e}")
             raise
@@ -942,12 +1073,23 @@ async def root():
                     card.className = 'node-card';
                     card.id = `node-card-${nodeName}`;
                     
-                    if (nodeData.error || !nodeData.ps) {
+                    // 檢查是否有錯誤或無法獲取數據
+                    // 檢查是否是外部節點且不支持 /api/ps（這是正常的）
+                    const isExternalNoPS = nodeData.error && (nodeData.error.includes('does not support /api/ps') || nodeData.error.includes('External API'));
+                    
+                    if (nodeData.error || (!nodeData.ps && nodeData.error !== null)) {
                         card.classList.add('error');
+                        // 對於外部節點不支持 /api/ps 的情況，使用藍色邊框表示這是信息而非錯誤
+                        if (isExternalNoPS) {
+                            card.style.borderLeftColor = '#3b82f6';
+                        }
+                        const errorMsg = nodeData.error || '無法獲取數據';
+                        const url = nodeData.url || 'N/A';
                         card.innerHTML = `
                             <h3>${nodeName.toUpperCase()}</h3>
-                            <div class="error-msg">${nodeData.error || '無法獲取數據'}</div>
-                            <div class="process-detail">URL: ${nodeData.url}</div>
+                            <div class="error-msg" style="${isExternalNoPS ? 'color: #3b82f6;' : ''}">${errorMsg}</div>
+                            <div class="process-detail">URL: ${url}</div>
+                            ${isExternalNoPS ? '<div class="process-detail" style="color: #6b7280; font-size: 12px; margin-top: 8px;">ℹ️ 外部 API 服務通常不支持進程查詢端點，這是正常現象</div>' : ''}
                         `;
                     } else {
                         // 兼容兩種格式：標準的 processes 和可能的 models 格式
@@ -1031,11 +1173,26 @@ async def root():
                     
                     try {
                         const response = await fetch('/nodes/ps');
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                        }
                         const data = await response.json();
+                        
+                        console.log('Nodes PS data:', data); // 調試用
                         
                         // 如果是首次加載，清空容器
                         if (!nodeCards || Object.keys(nodeCards).length === 0) {
                             container.innerHTML = '';
+                        }
+                        
+                        // 檢查是否有數據
+                        if (!data || Object.keys(data).length === 0) {
+                            if (isFirstLoad) {
+                                container.innerHTML = '<div class="error-msg">沒有找到任何節點配置</div>';
+                            } else {
+                                updateRefreshStatus('沒有節點數據');
+                            }
+                            return;
                         }
                         
                         // 更新或創建每個節點的卡片
@@ -1060,10 +1217,11 @@ async def root():
                             updateRefreshStatus('已更新');
                         }
                     } catch (error) {
+                        console.error('Error loading nodes PS:', error);
                         if (isFirstLoad) {
-                            container.innerHTML = `<div class="error-msg">加載失敗: ${error.message}</div>`;
+                            container.innerHTML = `<div class="error-msg">加載失敗: ${error.message}<br><small>請檢查瀏覽器控制台獲取詳細信息</small></div>`;
                         } else {
-                            updateRefreshStatus('刷新失敗');
+                            updateRefreshStatus('刷新失敗: ' + error.message);
                         }
                     }
                 }
@@ -1126,33 +1284,72 @@ async def health():
 @app.get("/nodes")
 async def get_nodes():
     """獲取所有節點狀態"""
+    nodes_info = []
+    for node in NODES:
+        node_info = {
+            "name": node["name"],
+            "type": node.get("type", "local"),
+            "weight": node["weight"],
+            "enabled": node.get("enabled", True),
+            "stats": node_stats[node["name"]],
+            "models": list(node_models.get(node["name"], set())),
+            "config": node_config.get(node["name"], {}),
+        }
+        if node.get("type") == "external":
+            node_info["api_url"] = node.get("api_url")
+        else:
+            node_info["hosts"] = node.get("hosts", [])
+            node_info["port"] = node.get("port", 11434)
+        nodes_info.append(node_info)
+    
     return {
         "scheduling_strategy": SCHEDULING_STRATEGY,
-        "nodes": [
-            {
-                "name": node["name"],
-                "hosts": node["hosts"],
-                "port": node["port"],
-                "weight": node["weight"],
-                "enabled": node.get("enabled", True),
-                "stats": node_stats[node["name"]],
-                "models": list(node_models.get(node["name"], set())),
-                "config": node_config.get(node["name"], {}),
-            }
-            for node in NODES
-        ]
+        "nodes": nodes_info
     }
 
 
 async def get_node_ps(node: Dict) -> Optional[Dict]:
     """獲取節點的運行中進程信息（/api/ps）"""
+    # 外部節點可能不支持 /api/ps 端點，直接返回 None 並在調用處處理
+    if node.get("type") == "external":
+        # 對於外部節點，嘗試獲取但失敗時不報錯
+        try:
+            base_url = get_node_url(node)
+            url = f"{base_url}/api/ps"
+            headers = get_node_headers(node)
+            
+            timeout_seconds = node.get("timeout_seconds", 5.0)
+            timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+            
+            print(f"Fetching /api/ps from external node {node['name']}: {url}")
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(url, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"Got /api/ps from {node['name']}: {len(data.get('processes', []))} processes")
+                    return data
+                elif response.status_code == 404:
+                    # 404 表示端點不存在，這是正常的（外部 API 可能不支持）
+                    print(f"⚠️  External node {node['name']} does not support /api/ps endpoint (404)")
+                    return None
+                else:
+                    print(f"⚠️  Failed to get /api/ps from {node['name']}: HTTP {response.status_code}")
+                    return None
+        except Exception as e:
+            print(f"⚠️  External node {node['name']} /api/ps not available: {e}")
+            return None
+    
+    # 本地節點
     try:
-        # 使用第一個主機名（如果有的話），否則使用 IP
-        host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
-        url = f"http://{host}:{node['port']}/api/ps"
+        base_url = get_node_url(node)
+        url = f"{base_url}/api/ps"
+        headers = get_node_headers(node)
+        
+        timeout = httpx.Timeout(5.0, connect=10.0)
+        
         print(f"Fetching /api/ps from {node['name']}: {url}")
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            response = await client.get(url)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
             if response.status_code == 200:
                 data = response.json()
                 print(f"Got /api/ps from {node['name']}: {len(data.get('processes', []))} processes")
@@ -1164,41 +1361,113 @@ async def get_node_ps(node: Dict) -> Optional[Dict]:
     return None
 
 
+# 診斷端點：查看配置狀態
+@app.get("/debug/config")
+async def debug_config():
+    """診斷端點：查看配置加載狀態"""
+    return {
+        "config_file": CONFIG_FILE,
+        "config_file_exists": os.path.exists(CONFIG_FILE),
+        "config_file_path": os.path.abspath(CONFIG_FILE),
+        "nodes_count": len(NODES),
+        "nodes": [{"name": n["name"], "type": n.get("type", "local")} for n in NODES],
+        "node_config_count": len(node_config),
+        "node_config_keys": list(node_config.keys()),
+        "config_data_nodes_count": len(config_data.get("nodes", [])),
+    }
+
 # 獲取所有節點的運行中進程信息
 @app.get("/nodes/ps")
 async def get_all_nodes_ps():
     """獲取所有節點的運行中進程信息"""
     result = {}
+    
+    # 如果 NODES 為空，嘗試重新加載配置
+    if not NODES:
+        print("⚠️  Warning: NODES list is empty, attempting to reload config...")
+        load_config()
+        if not NODES:
+            print("❌ Error: NODES list is still empty after reload, no nodes configured")
+            print(f"   Config file path: {CONFIG_FILE}")
+            print(f"   Config file exists: {os.path.exists(CONFIG_FILE)}")
+            return {
+                "_error": "No nodes configured",
+                "_config_file": CONFIG_FILE,
+                "_config_file_exists": os.path.exists(CONFIG_FILE),
+                "_config_file_path": os.path.abspath(CONFIG_FILE) if CONFIG_FILE else None,
+            }
+    
     for node in NODES:
-        if node.get("enabled", True) and node_stats[node["name"]]["is_healthy"]:
-            ps_data = await get_node_ps(node)
-            # 使用主機名構建 URL（如果有的話）
-            host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
-            url = f"http://{host}:{node['port']}"
+        try:
+            url = get_node_url(node)
+        except (ValueError, KeyError) as e:
+            # 如果無法構建 URL（例如缺少 hosts），使用錯誤信息
+            url = f"Error: {str(e)}"
+            print(f"⚠️  Warning: Cannot build URL for {node['name']}: {e}")
+        
+        # 確保節點狀態已初始化
+        if node["name"] not in node_stats:
+            node_stats[node["name"]] = {
+                "active_connections": 0,
+                "total_requests": 0,
+                "failed_requests": 0,
+                "last_health_check": None,
+                "is_healthy": False,
+                "current_weight": node.get("weight", 1.0),
+                "effective_weight": node.get("weight", 1.0),
+                "last_model_sync": None,
+            }
+        
+        if not node.get("enabled", True):
             result[node["name"]] = {
-                "url": url,
-                "ps": ps_data,
-                "error": None if ps_data else "Failed to fetch"
+                "url": url if isinstance(url, str) and not url.startswith("Error:") else "N/A",
+                "ps": None,
+                "error": "Node is disabled"
             }
         else:
-            host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
-            url = f"http://{host}:{node['port']}"
-            result[node["name"]] = {
-                "url": url,
-                "ps": None,
-                "error": "Node is not healthy or disabled"
-            }
+            # 嘗試獲取進程信息（無論健康狀態如何）
+            try:
+                ps_data = await get_node_ps(node)
+                # 對於外部節點，如果無法獲取進程信息，顯示友好提示
+                if node.get("type") == "external" and not ps_data:
+                    result[node["name"]] = {
+                        "url": url if isinstance(url, str) and not url.startswith("Error:") else "N/A",
+                        "ps": None,
+                        "error": "External API does not support /api/ps endpoint (this is normal for cloud services)"
+                    }
+                else:
+                    result[node["name"]] = {
+                        "url": url if isinstance(url, str) and not url.startswith("Error:") else "N/A",
+                        "ps": ps_data,
+                        "error": None if ps_data else ("Node is not healthy" if not node_stats[node["name"]]["is_healthy"] else "Failed to fetch process data")
+                    }
+            except Exception as e:
+                # 如果獲取失敗，仍然返回節點信息（帶錯誤）
+                error_msg = f"Failed to fetch: {str(e)}"
+                if node.get("type") == "external":
+                    error_msg = "External API may not support /api/ps endpoint"
+                result[node["name"]] = {
+                    "url": url if isinstance(url, str) and not url.startswith("Error:") else "N/A",
+                    "ps": None,
+                    "error": error_msg
+                }
+    
+    print(f"📊 Returning {len(result)} nodes for /nodes/ps")
     return result
 
 
 async def get_node_loaded_models(node: Dict) -> List[str]:
     """獲取節點已加載到內存的模型列表"""
     try:
-        # 使用第一個主機名（如果有的話），否則使用 IP
-        host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
-        url = f"http://{host}:{node['port']}/api/ps"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            response = await client.get(url)
+        base_url = get_node_url(node)
+        url = f"{base_url}/api/ps"
+        headers = get_node_headers(node)
+        
+        timeout_seconds = node.get("timeout_seconds", 5.0) if node.get("type") == "external" else 5.0
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
             if response.status_code == 200:
                 data = response.json()
                 # 檢查是否有 models 字段（已加載的模型）
@@ -1233,10 +1502,15 @@ async def get_all_nodes_loaded_models():
 async def get_node_tags(node: Dict) -> Dict:
     """獲取節點所有已下載的模型列表（通過 /api/tags）"""
     try:
-        host = node['hosts'][1] if len(node['hosts']) > 1 and '.' not in node['hosts'][1] else node['hosts'][0]
-        url = f"http://{host}:{node['port']}/api/tags"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            response = await client.get(url)
+        base_url = get_node_url(node)
+        url = f"{base_url}/api/tags"
+        headers = get_node_headers(node)
+        
+        timeout_seconds = node.get("timeout_seconds", 5.0) if node.get("type") == "external" else 5.0
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
             if response.status_code == 200:
                 return response.json()
             else:
@@ -1341,8 +1615,7 @@ async def query_model_routing(model_name: str):
             node_name = node["name"]
             node_info = {
                 "name": node_name,
-                "hosts": node["hosts"],
-                "port": node["port"],
+                "type": node.get("type", "local"),
                 "enabled": node.get("enabled", True),
                 "healthy": node_stats[node_name]["is_healthy"],
                 "has_model": base_name in node_models.get(node_name, set()),
@@ -1350,6 +1623,11 @@ async def query_model_routing(model_name: str):
                 "config": node_config.get(node_name, {}),
                 "reasons": []
             }
+            if node.get("type") == "external":
+                node_info["api_url"] = node.get("api_url")
+            else:
+                node_info["hosts"] = node.get("hosts", [])
+                node_info["port"] = node.get("port", 11434)
             
             # 检查各种条件
             if not node_info["enabled"]:
@@ -1382,12 +1660,17 @@ async def query_model_routing(model_name: str):
         if not candidate_nodes:
             for node in NODES:
                 if node.get("enabled", True) and node_stats[node["name"]]["is_healthy"]:
-                    fallback_nodes.append({
+                    fallback_node = {
                         "name": node["name"],
-                        "hosts": node["hosts"],
-                        "port": node["port"],
+                        "type": node.get("type", "local"),
                         "reason": "回退到所有健康节点（允许模型下载）"
-                    })
+                    }
+                    if node.get("type") == "external":
+                        fallback_node["api_url"] = node.get("api_url")
+                    else:
+                        fallback_node["hosts"] = node.get("hosts", [])
+                        fallback_node["port"] = node.get("port", 11434)
+                    fallback_nodes.append(fallback_node)
         
         return {
             "model_name": model_name,
@@ -1412,19 +1695,25 @@ async def query_model_routing(model_name: str):
 @app.get("/api/routing/rules")
 async def get_routing_rules():
     """获取所有路由规则"""
+    nodes_info = []
+    for node in NODES:
+        node_info = {
+            "name": node["name"],
+            "type": node.get("type", "local"),
+            "enabled": node.get("enabled", True),
+            "healthy": node_stats[node["name"]]["is_healthy"],
+            "config": node_config.get(node["name"], {}),
+            "available_models": list(node_models.get(node["name"], set()))
+        }
+        if node.get("type") == "external":
+            node_info["api_url"] = node.get("api_url")
+        else:
+            node_info["hosts"] = node.get("hosts", [])
+            node_info["port"] = node.get("port", 11434)
+        nodes_info.append(node_info)
+    
     return {
-        "nodes": [
-            {
-                "name": node["name"],
-                "hosts": node["hosts"],
-                "port": node["port"],
-                "enabled": node.get("enabled", True),
-                "healthy": node_stats[node["name"]]["is_healthy"],
-                "config": node_config.get(node["name"], {}),
-                "available_models": list(node_models.get(node["name"], set()))
-            }
-            for node in NODES
-        ],
+        "nodes": nodes_info,
         "model_patterns": model_patterns,
         "model_mappings": model_name_mapping,
         "default_model_size_b": default_model_size,
@@ -1824,7 +2113,9 @@ async def routing_viewer():
                 html += `<span class="status ${node.healthy ? 'healthy' : 'unhealthy'}">${node.healthy ? '健康' : '不健康'}</span>`;
             }
             
-            if (node.hosts) {
+            if (node.type === 'external') {
+                html += `<div class="info"><strong>API URL:</strong> ${node.api_url || 'N/A'}</div>`;
+            } else if (node.hosts && node.hosts.length > 0) {
                 html += `<div class="info"><strong>地址:</strong> ${node.hosts[0]}:${node.port || 11434}</div>`;
             }
             
@@ -1875,7 +2166,10 @@ async def routing_viewer():
                             <h3>${node.name.toUpperCase()}</h3>
                             <span class="status ${node.enabled ? 'enabled' : 'disabled'}">${node.enabled ? '已启用' : '已禁用'}</span>
                             <span class="status ${node.healthy ? 'healthy' : 'unhealthy'}">${node.healthy ? '健康' : '不健康'}</span>
-                            <div class="info"><strong>地址:</strong> ${node.hosts[0]}:${node.port}</div>
+                            ${node.type === 'external' ? 
+                                `<div class="info"><strong>API URL:</strong> ${node.api_url || 'N/A'}</div>` : 
+                                `<div class="info"><strong>地址:</strong> ${node.hosts && node.hosts.length > 0 ? node.hosts[0] + ':' + node.port : 'N/A'}</div>`
+                            }
                             ${node.config.memory_gb ? `<div class="info"><strong>内存:</strong> ${node.config.memory_gb}GB</div>` : ''}
                             ${node.config.description ? `<div class="info"><strong>描述:</strong> ${node.config.description}</div>` : ''}
                             ${node.config.supported_model_ranges ? `

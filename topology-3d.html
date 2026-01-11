@@ -394,66 +394,113 @@
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     
     <script>
-        // 配置
+        // 配置（將從 API 動態加載）
         const CONFIG = {
             exporterUrls: {
-                node1: 'http://192.168.50.158:9101/metrics',
-                node2: 'http://192.168.50.31:9101/metrics',
-                node3: 'http://192.168.50.94:9101/metrics',
-                node4: 'http://192.168.50.155:9101/metrics',
-                router: null
+                router: null  // router 是虛擬節點
             },
             updateInterval: 2000,
             nodePositions: {
-                router: { x: 0, y: 0, z: 0 },
-                node1: { x: 4, y: 0, z: 0 },
-                node2: { x: -4, y: 0, z: 0 },
-                node3: { x: 0, y: 0, z: 4 },
-                node4: { x: 0, y: 0, z: -4 }
+                router: { x: 0, y: 0, z: 0 }  // router 始終在中心
             },
             nodeColors: {
                 router: 0x3b82f6,    // 藍色
                 active: 0x10b981,      // 綠色
-                idle: 0x9ca3af        // 灰色
+                idle: 0x9ca3af,        // 灰色
+                external: 0xf59e0b     // 橙色（外部節點）
             },
-            // 硬件規格和IP信息
+            // 硬件規格和IP信息（將從 API 動態加載）
             nodeInfo: {
                 router: {
-                    name: 'Router',
-                    ip: '192.168.50.1',
-                    hostname: 'router',
-                    spec: 'Gateway'
-                },
-                node1: {
-                    name: 'Node1',
-                    ip: '192.168.50.158',
-                    hostname: 'm3max',
-                    hostnames: ['m3max.local', 'm3max-128gb.local'],
-                    spec: 'M3 Max - 128GB'
-                },
-                node2: {
-                    name: 'Node2',
-                    ip: '192.168.50.31',
-                    hostname: 'm1max',
-                    hostnames: ['m1max.local', 'm1max-64gb.local'],
-                    spec: 'M1 Max - 64GB'
-                },
-                node3: {
-                    name: 'Node3',
-                    ip: '192.168.50.94',
-                    hostname: 'm1',
-                    hostnames: ['m1.local', 'm1-16gb.local'],
-                    spec: 'M1 - 16GB'
-                },
-                node4: {
-                    name: 'Node4',
-                    ip: '192.168.50.155',
-                    hostname: 'i7',
-                    hostnames: ['i74080.local', 'i7g13-4080-32gb.local'],
-                    spec: 'i7-4080 - 32GB'
+                    name: 'Gateway',
+                    ip: window.location.hostname,
+                    hostname: 'gateway',
+                    spec: 'Ollama Gateway'
                 }
             }
         };
+        
+        // 動態加載節點配置
+        async function loadNodeConfig() {
+            try {
+                const response = await fetch('/nodes');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                
+                // 清空現有配置（保留 router）
+                CONFIG.exporterUrls = { router: null };
+                CONFIG.nodePositions = { router: { x: 0, y: 0, z: 0 } };
+                CONFIG.nodeInfo = {
+                    router: CONFIG.nodeInfo.router
+                };
+                
+                const nodes = data.nodes || [];
+                const localNodes = nodes.filter(n => n.type === 'local');
+                const externalNodes = nodes.filter(n => n.type === 'external');
+                
+                // 為本地節點生成 exporter URLs（假設 exporter 在 9101 端口）
+                localNodes.forEach((node, index) => {
+                    const nodeName = node.name;
+                    const host = node.hosts && node.hosts.length > 0 ? node.hosts[0] : 'unknown';
+                    CONFIG.exporterUrls[nodeName] = `http://${host}:9101/metrics`;
+                    
+                    // 從配置中提取信息
+                    const config = node.config || {};
+                    const description = config.description || '';
+                    const memoryGb = config.memory_gb || '';
+                    
+                    CONFIG.nodeInfo[nodeName] = {
+                        name: nodeName.toUpperCase(),
+                        ip: host,
+                        hostname: node.hosts && node.hosts.length > 1 ? node.hosts[1] : host,
+                        hostnames: node.hosts && node.hosts.length > 2 ? node.hosts.slice(2) : [],
+                        spec: description || (memoryGb ? `${memoryGb}GB` : '')
+                    };
+                });
+                
+                // 為外部節點添加信息
+                externalNodes.forEach((node, index) => {
+                    const nodeName = node.name;
+                    CONFIG.exporterUrls[nodeName] = null; // 外部節點沒有 exporter
+                    
+                    const config = node.config || {};
+                    const description = config.description || '';
+                    
+                    CONFIG.nodeInfo[nodeName] = {
+                        name: nodeName.toUpperCase(),
+                        ip: node.api_url || 'N/A',
+                        hostname: 'external',
+                        spec: description || 'External API'
+                    };
+                });
+                
+                // 自動生成節點位置（圓形布局）
+                const allNodes = [...localNodes, ...externalNodes];
+                const radius = Math.max(4, Math.ceil(allNodes.length / 2) * 2);
+                const angleStep = (2 * Math.PI) / allNodes.length;
+                
+                allNodes.forEach((node, index) => {
+                    const nodeName = node.name;
+                    const angle = index * angleStep;
+                    const x = Math.cos(angle) * radius;
+                    const z = Math.sin(angle) * radius;
+                    CONFIG.nodePositions[nodeName] = { x, y: 0, z };
+                });
+                
+                console.log('✅ Loaded node config:', {
+                    nodes: allNodes.length,
+                    local: localNodes.length,
+                    external: externalNodes.length,
+                    positions: Object.keys(CONFIG.nodePositions).length
+                });
+                
+                return true;
+            } catch (error) {
+                console.error('❌ Failed to load node config:', error);
+                // 使用默認配置（向後兼容）
+                return false;
+            }
+        }
         
         // 場景設置
         let scene, camera, renderer, controls;
@@ -733,9 +780,14 @@
         
         // 創建節點（服務器機架風格）
         function createNodes() {
-            const nodeNames = ['router', 'node1', 'node2', 'node3', 'node4'];
+            // 動態獲取所有節點名稱（包括 router）
+            const nodeNames = ['router', ...Object.keys(CONFIG.nodePositions).filter(n => n !== 'router')];
             
             nodeNames.forEach(nodeName => {
+                if (!CONFIG.nodePositions[nodeName]) {
+                    console.warn(`No position defined for node: ${nodeName}`);
+                    return;
+                }
                 const pos = CONFIG.nodePositions[nodeName];
                 
                 // 創建服務器機架樣式的節點（立方體）
@@ -744,8 +796,15 @@
                 const depth = 0.6;
                 
                 const geometry = new THREE.BoxGeometry(width, height, depth);
+                // 檢查是否是外部節點
+                const nodeInfo = CONFIG.nodeInfo[nodeName] || {};
+                const isExternal = nodeInfo.spec && nodeInfo.spec.includes('External');
+                const baseColor = nodeName === 'router' 
+                    ? CONFIG.nodeColors.router 
+                    : (isExternal ? CONFIG.nodeColors.external : CONFIG.nodeColors.idle);
+                
                 const material = new THREE.MeshStandardMaterial({
-                    color: nodeName === 'router' ? CONFIG.nodeColors.router : CONFIG.nodeColors.idle,
+                    color: baseColor,
                     roughness: 0.3,
                     metalness: 0.7,
                     emissive: 0x000000
@@ -771,7 +830,7 @@
                 mesh.add(indicator);
                 
                 // 創建簡單的節點名稱標簽（始終顯示，只顯示節點名稱）
-                const nodeInfo = CONFIG.nodeInfo[nodeName];
+                // nodeInfo 已在上面聲明，直接使用
                 const displayName = nodeInfo ? nodeInfo.name : nodeName.toUpperCase();
                 
                 const simpleLabelTexture = createTextTexture([{ text: displayName }], {
@@ -876,9 +935,13 @@
         
         // 創建連接線（網絡線風格，支持可變粗細）
         function createEdges() {
-            const nodeNames = ['node1', 'node2', 'node3', 'node4'];
+            // 動態獲取所有節點名稱（不包括 router）
+            const nodeNames = Object.keys(CONFIG.nodePositions).filter(n => n !== 'router');
             
             nodeNames.forEach(nodeName => {
+                if (!CONFIG.nodePositions[nodeName] || !CONFIG.nodePositions.router) {
+                    return;
+                }
                 const sourcePos = CONFIG.nodePositions[nodeName];
                 const targetPos = CONFIG.nodePositions.router;
                 
@@ -1155,15 +1218,24 @@
             if (CONFIG.exporterUrls) {
                 const promises = Object.entries(CONFIG.exporterUrls).map(async ([nodeName, url]) => {
                     if (!url) {
-                        // router 是虛擬節點，計算總和
-                        const totalConnections = Object.keys(allData)
-                            .filter(k => k !== 'router' && k.startsWith('node'))
-                            .reduce((sum, k) => sum + (allData[k]?.connections || 0), 0);
-                        allData[nodeName] = { 
-                            connections: totalConnections, 
-                            sentRate: 0, 
-                            recvRate: 0 
-                        };
+                        // router 或外部節點（沒有 exporter），計算總和
+                        if (nodeName === 'router') {
+                            const totalConnections = Object.keys(allData)
+                                .filter(k => k !== 'router')
+                                .reduce((sum, k) => sum + (allData[k]?.connections || 0), 0);
+                            allData[nodeName] = { 
+                                connections: totalConnections, 
+                                sentRate: 0, 
+                                recvRate: 0 
+                            };
+                        } else {
+                            // 外部節點沒有 metrics，設置為 0
+                            allData[nodeName] = { 
+                                connections: 0, 
+                                sentRate: 0, 
+                                recvRate: 0 
+                            };
+                        }
                         return;
                     }
                     
@@ -1522,14 +1594,22 @@
         window.addEventListener('mousemove', onMouseMove);
         window.addEventListener('click', onMouseClick);
         
-        // 初始化
-        initScene();
+        // 先加載節點配置，然後初始化場景
+        async function initialize() {
+            document.getElementById('status-text').textContent = '正在加載節點配置...';
+            const configLoaded = await loadNodeConfig();
+            if (configLoaded) {
+                document.getElementById('status-text').textContent = '正在初始化場景...';
+            }
+            initScene();
+            animate();
+            fetchMetrics();
+            fetchLoadedModels();
+            setInterval(fetchMetrics, CONFIG.updateInterval);
+            setInterval(fetchLoadedModels, CONFIG.updateInterval * 2);
+        }
         
-        // 定期獲取數據
-        fetchMetrics();
-        fetchLoadedModels(); // 獲取已加載模型
-        setInterval(fetchMetrics, CONFIG.updateInterval);
-        setInterval(fetchLoadedModels, CONFIG.updateInterval * 2); // 每4秒更新一次模型列表
+        initialize();
     </script>
 </body>
 </html>
