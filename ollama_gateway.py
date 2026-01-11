@@ -1280,16 +1280,31 @@ async def health():
     }
 
 
-# 節點狀態端點
-@app.get("/nodes")
-async def get_nodes():
-    """獲取所有節點狀態"""
+# 節點狀態端點（JSON API）
+@app.get("/api/nodes")
+async def get_nodes_api():
+    """獲取所有節點狀態（JSON API）"""
     nodes_info = []
     for node in NODES:
+        # 確保節點狀態已初始化
+        if node["name"] not in node_stats:
+            node_stats[node["name"]] = {
+                "active_connections": 0,
+                "total_requests": 0,
+                "failed_requests": 0,
+                "last_health_check": None,
+                "is_healthy": False,
+                "current_weight": node.get("weight", 1.0),
+                "effective_weight": node.get("weight", 1.0),
+                "last_model_sync": None,
+            }
+        if node["name"] not in node_models:
+            node_models[node["name"]] = set()
+        
         node_info = {
             "name": node["name"],
             "type": node.get("type", "local"),
-            "weight": node["weight"],
+            "weight": node.get("weight", 1.0),
             "enabled": node.get("enabled", True),
             "stats": node_stats[node["name"]],
             "models": list(node_models.get(node["name"], set())),
@@ -1302,10 +1317,428 @@ async def get_nodes():
             node_info["port"] = node.get("port", 11434)
         nodes_info.append(node_info)
     
+    print(f"📊 /api/nodes returning {len(nodes_info)} nodes: {[n['name'] for n in nodes_info]}")
     return {
         "scheduling_strategy": SCHEDULING_STRATEGY,
         "nodes": nodes_info
     }
+
+# 節點狀態端點（HTML 頁面）
+@app.get("/nodes", response_class=HTMLResponse)
+async def get_nodes():
+    """節點狀態頁面"""
+    html_content = """
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>節點狀態 - Ollama Gateway</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        .toolbar {
+            padding: 20px;
+            background: white;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            margin: 2px;
+        }
+        .status-healthy {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .status-unhealthy {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .status-enabled {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+        .status-disabled {
+            background: #f3f4f6;
+            color: #6b7280;
+        }
+        .status-external {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .nodes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        .node-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-left: 4px solid #10b981;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .node-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        .node-card.unhealthy {
+            border-left-color: #ef4444;
+        }
+        .node-card.external {
+            border-left-color: #f59e0b;
+        }
+        .node-card.disabled {
+            border-left-color: #9ca3af;
+            opacity: 0.7;
+        }
+        .node-card h3 {
+            color: #1e40af;
+            margin-bottom: 15px;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .node-info {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .node-info strong {
+            color: #374151;
+            display: block;
+            margin-bottom: 5px;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .node-info .value {
+            color: #1f2937;
+            font-size: 14px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .stat-item {
+            background: #eff6ff;
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .stat-item .label {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 5px;
+        }
+        .stat-item .value {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2563eb;
+        }
+        .models-list {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e5e7eb;
+        }
+        .models-list strong {
+            display: block;
+            margin-bottom: 8px;
+            color: #374151;
+            font-size: 13px;
+        }
+        .models-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .model-tag {
+            background: #e0e7ff;
+            color: #3730a3;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .no-models {
+            color: #9ca3af;
+            font-size: 12px;
+            font-style: italic;
+        }
+        .ranges-list {
+            margin-top: 10px;
+        }
+        .range-item {
+            background: #f0fdf4;
+            padding: 6px 10px;
+            margin: 5px 0;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #065f46;
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 20px;
+            color: #2563eb;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+        }
+        .error-msg {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📡 節點狀態</h1>
+            <p>查看所有節點的詳細信息和狀態</p>
+        </div>
+        
+        <a href="/" class="back-link">← 返回首頁</a>
+        
+        <div class="toolbar">
+            <button class="btn btn-primary" onclick="loadNodes()">🔄 刷新</button>
+            <span id="status-text" style="color: #6b7280; font-size: 14px;"></span>
+        </div>
+        
+        <div id="nodes-container" class="loading">正在加載節點信息...</div>
+    </div>
+
+    <script>
+        async function loadNodes() {
+            const container = document.getElementById('nodes-container');
+            const statusText = document.getElementById('status-text');
+            
+            try {
+                statusText.textContent = '正在加載...';
+                const response = await fetch('/api/nodes');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const data = await response.json();
+                
+                console.log('Nodes data:', data); // 調試用
+                
+                if (!data.nodes || data.nodes.length === 0) {
+                    container.innerHTML = '<div class="error-msg">沒有找到任何節點配置</div>';
+                    statusText.textContent = '沒有節點';
+                    return;
+                }
+                
+                let html = '<div class="nodes-grid">';
+                
+                data.nodes.forEach(node => {
+                    console.log('Processing node:', node.name, 'type:', node.type); // 調試用
+                    const isHealthy = node.stats && node.stats.is_healthy;
+                    const isEnabled = node.enabled !== false;
+                    const isExternal = node.type === 'external';
+                    
+                    let cardClass = 'node-card';
+                    if (!isEnabled) {
+                        cardClass += ' disabled';
+                    } else if (!isHealthy) {
+                        cardClass += ' unhealthy';
+                    } else if (isExternal) {
+                        cardClass += ' external';
+                    }
+                    
+                    // 構建地址信息
+                    let addressInfo = '';
+                    if (isExternal) {
+                        addressInfo = `<div class="node-info">
+                            <strong>API URL</strong>
+                            <div class="value">${node.api_url || 'N/A'}</div>
+                        </div>`;
+                    } else if (node.hosts && node.hosts.length > 0) {
+                        addressInfo = `<div class="node-info">
+                            <strong>地址</strong>
+                            <div class="value">${node.hosts[0]}:${node.port || 11434}</div>
+                            ${node.hosts.length > 1 ? `<div style="font-size: 11px; color: #6b7280; margin-top: 4px;">其他: ${node.hosts.slice(1).join(', ')}</div>` : ''}
+                        </div>`;
+                    }
+                    
+                    // 構建配置信息
+                    let configInfo = '';
+                    if (node.config) {
+                        const config = node.config;
+                        if (config.description) {
+                            configInfo += `<div class="node-info">
+                                <strong>描述</strong>
+                                <div class="value">${config.description}</div>
+                            </div>`;
+                        }
+                        if (config.memory_gb) {
+                            configInfo += `<div class="node-info">
+                                <strong>內存</strong>
+                                <div class="value">${config.memory_gb} GB</div>
+                            </div>`;
+                        }
+                        if (config.supported_model_ranges && config.supported_model_ranges.length > 0) {
+                            configInfo += `<div class="node-info">
+                                <strong>支持的模型範圍</strong>
+                                <div class="ranges-list">
+                                    ${config.supported_model_ranges.map(range => {
+                                        const min = range.min_params_b || 0;
+                                        const max = range.max_params_b === null ? '∞' : range.max_params_b;
+                                        return `<div class="range-item">${min}B ~ ${max}B${range.description ? ' (' + range.description + ')' : ''}</div>`;
+                                    }).join('')}
+                                </div>
+                            </div>`;
+                        }
+                    }
+                    
+                    // 構建統計信息
+                    const stats = node.stats || {};
+                    const statsHtml = `
+                        <div class="stats-grid">
+                            <div class="stat-item">
+                                <div class="label">活躍連接</div>
+                                <div class="value">${stats.active_connections || 0}</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="label">總請求數</div>
+                                <div class="value">${stats.total_requests || 0}</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="label">失敗請求</div>
+                                <div class="value">${stats.failed_requests || 0}</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="label">權重</div>
+                                <div class="value">${node.weight || 1.0}</div>
+                            </div>
+                        </div>
+                    `;
+                    
+                    // 構建模型列表
+                    const models = node.models || [];
+                    const modelsHtml = models.length > 0
+                        ? `<div class="models-list">
+                            <strong>已下載模型 (${models.length})</strong>
+                            <div class="models-tags">
+                                ${models.slice(0, 10).map(model => `<span class="model-tag">${model}</span>`).join('')}
+                                ${models.length > 10 ? `<span class="model-tag">+${models.length - 10} 更多</span>` : ''}
+                            </div>
+                          </div>`
+                        : `<div class="models-list">
+                            <strong>已下載模型</strong>
+                            <div class="no-models">暫無模型</div>
+                          </div>`;
+                    
+                    html += `
+                        <div class="${cardClass}">
+                            <h3>
+                                ${node.name.toUpperCase()}
+                                <div>
+                                    ${isExternal ? '<span class="status-badge status-external">外部</span>' : ''}
+                                    <span class="status-badge ${isEnabled ? 'status-enabled' : 'status-disabled'}">${isEnabled ? '已啟用' : '已禁用'}</span>
+                                    <span class="status-badge ${isHealthy ? 'status-healthy' : 'status-unhealthy'}">${isHealthy ? '健康' : '不健康'}</span>
+                                </div>
+                            </h3>
+                            ${addressInfo}
+                            ${configInfo}
+                            ${statsHtml}
+                            ${modelsHtml}
+                        </div>
+                    `;
+                });
+                
+                html += '</div>';
+                container.innerHTML = html;
+                
+                const localCount = data.nodes.filter(n => n.type === 'local').length;
+                const externalCount = data.nodes.filter(n => n.type === 'external').length;
+                statusText.textContent = `已加載 ${data.nodes.length} 個節點 (${localCount} 本地, ${externalCount} 外部) | 調度策略: ${data.scheduling_strategy} | 最後更新: ${new Date().toLocaleTimeString()}`;
+                
+            } catch (error) {
+                console.error('Error loading nodes:', error);
+                container.innerHTML = `<div class="error-msg">加載失敗: ${error.message}<br><small>請檢查瀏覽器控制台獲取詳細信息</small></div>`;
+                statusText.textContent = '加載失敗';
+            }
+        }
+        
+        // 頁面加載時自動加載
+        window.addEventListener('DOMContentLoaded', () => {
+            loadNodes();
+        });
+        
+        // 每 10 秒自動刷新
+        setInterval(() => {
+            loadNodes();
+        }, 10000);
+    </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 async def get_node_ps(node: Dict) -> Optional[Dict]:

@@ -423,7 +423,7 @@
         // 動態加載節點配置
         async function loadNodeConfig() {
             try {
-                const response = await fetch('/nodes');
+                const response = await fetch('/api/nodes');
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const data = await response.json();
                 
@@ -1214,57 +1214,107 @@
         async function fetchMetrics() {
             const allData = {};
             let successCount = 0;
+            let exporterCount = 0; // 有 exporter 的節點數量
+            let noExporterCount = 0; // 沒有 exporter 的節點數量（外部節點等）
             
             if (CONFIG.exporterUrls) {
                 const promises = Object.entries(CONFIG.exporterUrls).map(async ([nodeName, url]) => {
                     if (!url) {
-                        // router 或外部節點（沒有 exporter），計算總和
+                        // router 或外部節點（沒有 exporter）
+                        noExporterCount++;
                         if (nodeName === 'router') {
-                            const totalConnections = Object.keys(allData)
-                                .filter(k => k !== 'router')
-                                .reduce((sum, k) => sum + (allData[k]?.connections || 0), 0);
+                            // router 的連接數稍後計算
                             allData[nodeName] = { 
-                                connections: totalConnections, 
+                                connections: 0, // 稍後計算
                                 sentRate: 0, 
                                 recvRate: 0 
                             };
                         } else {
-                            // 外部節點沒有 metrics，設置為 0
-                            allData[nodeName] = { 
-                                connections: 0, 
-                                sentRate: 0, 
-                                recvRate: 0 
-                            };
+                            // 外部節點沒有 metrics，嘗試從網關獲取統計信息
+                            try {
+                                const gatewayResponse = await fetch('/api/nodes');
+                                if (gatewayResponse.ok) {
+                                    const gatewayData = await gatewayResponse.json();
+                                    const nodeInfo = gatewayData.nodes.find(n => n.name === nodeName);
+                                    if (nodeInfo && nodeInfo.stats) {
+                                        allData[nodeName] = {
+                                            connections: nodeInfo.stats.active_connections || 0,
+                                            sentRate: 0,
+                                            recvRate: 0
+                                        };
+                                    } else {
+                                        allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                                    }
+                                } else {
+                                    allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                                }
+                            } catch (e) {
+                                allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                            }
                         }
                         return;
                     }
                     
+                    // 有 exporter URL 的節點
+                    exporterCount++;
                     const nodeData = await fetchSingleExporter(url, nodeName);
                     if (nodeData) {
                         allData[nodeName] = nodeData;
                         successCount++;
                     } else {
-                        allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                        // 如果 exporter 失敗，嘗試從網關獲取統計信息
+                        try {
+                            const gatewayResponse = await fetch('/api/nodes');
+                            if (gatewayResponse.ok) {
+                                const gatewayData = await gatewayResponse.json();
+                                const nodeInfo = gatewayData.nodes.find(n => n.name === nodeName);
+                                if (nodeInfo && nodeInfo.stats) {
+                                    allData[nodeName] = {
+                                        connections: nodeInfo.stats.active_connections || 0,
+                                        sentRate: 0,
+                                        recvRate: 0
+                                    };
+                                } else {
+                                    allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                                }
+                            } else {
+                                allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                            }
+                        } catch (e) {
+                            allData[nodeName] = { connections: 0, sentRate: 0, recvRate: 0 };
+                        }
                     }
                 });
                 
                 await Promise.all(promises);
                 
-                // 重新計算 router 的連接數
+                // 重新計算 router 的連接數（包括所有非 router 節點）
                 const totalConnections = Object.keys(allData)
-                    .filter(k => k !== 'router' && k.startsWith('node'))
+                    .filter(k => k !== 'router')
                     .reduce((sum, k) => sum + (allData[k]?.connections || 0), 0);
                 if (allData.router) {
                     allData.router.connections = totalConnections;
                 }
             }
             
-            if (successCount === 0) {
+            // 更新狀態文本
+            const totalNodes = Object.keys(allData).length;
+            if (exporterCount > 0 && successCount === 0) {
+                // 有 exporter 但都失敗了
                 document.getElementById('status-text').textContent = 
-                    `⚠️ 無法連接到 exporter | 檢查 exporter 是否運行`;
+                    `⚠️ 無法連接到 exporter (${exporterCount} 個節點) | 檢查 exporter 是否運行`;
+            } else if (successCount > 0) {
+                // 至少有一些節點成功
+                const statusParts = [`✅ ${successCount}/${exporterCount} 個 exporter 連接成功`];
+                if (noExporterCount > 0) {
+                    statusParts.push(`${noExporterCount} 個節點無 exporter（正常）`);
+                }
+                statusParts.push(`最後更新: ${new Date().toLocaleTimeString()}`);
+                document.getElementById('status-text').textContent = statusParts.join(' | ');
             } else {
+                // 沒有 exporter 或都是外部節點
                 document.getElementById('status-text').textContent = 
-                    `✅ 已連接 ${successCount} 個節點 | 最後更新: ${new Date().toLocaleTimeString()}`;
+                    `ℹ️ ${totalNodes} 個節點 | ${noExporterCount} 個無 exporter（外部節點等） | 最後更新: ${new Date().toLocaleTimeString()}`;
             }
             
             updateNodes(allData);
@@ -1279,7 +1329,8 @@
             const container = document.getElementById('nodes-info');
             container.innerHTML = '';
             
-            const nodeNames = ['router', 'node1', 'node2', 'node3', 'node4'];
+            // 動態獲取所有節點名稱（包括 router 和所有配置的節點）
+            const nodeNames = ['router', ...Object.keys(CONFIG.nodePositions).filter(n => n !== 'router')];
             nodeNames.forEach(nodeName => {
                 const nodeData = data[nodeName] || { connections: 0, sentRate: 0, recvRate: 0 };
                 const totalRate = nodeData.sentRate + nodeData.recvRate;
@@ -1441,12 +1492,48 @@
             const modalBody = document.getElementById('modal-body');
             
             const nodeInfo = CONFIG.nodeInfo[nodeName];
+            const isExternal = nodeInfo && nodeInfo.spec && nodeInfo.spec.includes('External');
             modalTitle.textContent = `${nodeInfo ? nodeInfo.name : nodeName.toUpperCase()} - 已下載模型`;
             modalBody.innerHTML = '<div class="loading-spinner">載入中...</div>';
             modal.classList.add('active');
             
             try {
-                // 同時獲取已下載模型和已加載模型
+                // 檢查是否是外部節點
+                if (isExternal) {
+                    // 外部節點從 /api/nodes 獲取模型列表
+                    const nodesResponse = await fetch('/api/nodes');
+                    if (!nodesResponse.ok) throw new Error(`HTTP ${nodesResponse.status}`);
+                    const nodesData = await nodesResponse.json();
+                    const node = nodesData.nodes.find(n => n.name === nodeName);
+                    
+                    if (!node) {
+                        throw new Error(`Node ${nodeName} cannot be found in the current page`);
+                    }
+                    
+                    const models = node.models || [];
+                    if (models.length === 0) {
+                        modalBody.innerHTML = '<div class="empty-state">該外部節點暫無已下載的模型</div>';
+                        return;
+                    }
+                    
+                    // 格式化模型列表（外部節點只有名稱，沒有詳細信息）
+                    let html = '<div class="model-list">';
+                    models.forEach(modelName => {
+                        html += `
+                            <div class="model-item">
+                                <div class="model-name">${modelName}</div>
+                                <div class="model-info">
+                                    <span class="model-badge external-badge">外部節點</span>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                    modalBody.innerHTML = html;
+                    return;
+                }
+                
+                // 本地節點：同時獲取已下載模型和已加載模型
                 const [tagsResponse, loadedResponse] = await Promise.all([
                     fetch(`/nodes/${nodeName}/tags`),
                     fetch('/nodes/loaded-models')
