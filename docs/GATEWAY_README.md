@@ -110,8 +110,9 @@ GATEWAY_PORT=11435
 # 調度策略: round_robin, least_connections, weighted_round_robin
 SCHEDULING_STRATEGY=round_robin
 
-# 節點配置文件路徑（默認: node_config.json）
-NODE_CONFIG_FILE=node_config.json
+# 節點配置文件路徑（默認: config/node_config.json）
+# 如果設置為舊路徑 "node_config.json"，會自動轉換為 "config/node_config.json"
+NODE_CONFIG_FILE=config/node_config.json
 ```
 
 ### 4. 啟動網關

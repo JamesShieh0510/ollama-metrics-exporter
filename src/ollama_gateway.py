@@ -21,7 +21,38 @@ from fastapi.responses import Response as MetricsResponse
 load_dotenv()
 
 # 加載節點配置
-CONFIG_FILE = os.getenv("NODE_CONFIG_FILE", "node_config.json")
+# 获取项目根目录（src 的父目录）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 处理配置文件路径
+_config_file_env = os.getenv("NODE_CONFIG_FILE")
+if _config_file_env:
+    # 如果环境变量是绝对路径，直接使用
+    if os.path.isabs(_config_file_env):
+        CONFIG_FILE = _config_file_env
+    else:
+        # 如果是相对路径，先尝试相对于项目根目录
+        # 如果环境变量是旧路径 "node_config.json"，自动转换为新路径
+        if _config_file_env == "node_config.json":
+            CONFIG_FILE = os.path.join(PROJECT_ROOT, "config", "node_config.json")
+        else:
+            # 其他相对路径，相对于项目根目录
+            CONFIG_FILE = os.path.join(PROJECT_ROOT, _config_file_env)
+else:
+    # 默认路径：config/node_config.json
+    CONFIG_FILE = os.path.join(PROJECT_ROOT, "config", "node_config.json")
+
+# 调试信息：打印配置路径
+print(f"🔧 PROJECT_ROOT: {PROJECT_ROOT}")
+print(f"🔧 CONFIG_FILE: {CONFIG_FILE}")
+print(f"🔧 Config file exists: {os.path.exists(CONFIG_FILE)}")
+if not os.path.exists(CONFIG_FILE):
+    # 如果文件不存在，尝试查找旧位置（向后兼容）
+    old_config = os.path.join(PROJECT_ROOT, "node_config.json")
+    if os.path.exists(old_config):
+        print(f"⚠️  Found config at old location: {old_config}")
+        print(f"⚠️  Please move it to: {CONFIG_FILE}")
+        CONFIG_FILE = old_config
 node_config = {}
 model_patterns = {}
 model_name_mapping = {}
@@ -54,10 +85,13 @@ def load_config():
     """加載節點配置文件"""
     global node_config, model_patterns, model_name_mapping, default_model_size, config_data, NODES
     try:
+        print(f"📂 Loading config from: {CONFIG_FILE}")
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             config_data = json.load(f)
+            print(f"   ✅ Config file loaded, found {len(config_data.get('nodes', []))} nodes in config")
             # 解析環境變量引用
             config_data = resolve_config_values(config_data)
+            print(f"   ✅ Environment variables resolved")
             
             node_config = {node["name"]: node for node in config_data.get("nodes", [])}
             model_patterns = config_data.get("model_name_patterns", {})
@@ -66,7 +100,9 @@ def load_config():
             
             # 從配置文件構建 NODES 列表
             NODES.clear()
-            for node_cfg in config_data.get("nodes", []):
+            nodes_list = config_data.get("nodes", [])
+            print(f"   📋 Processing {len(nodes_list)} nodes...")
+            for node_cfg in nodes_list:
                 node_type = node_cfg.get("type", "local")
                 if node_type == "external":
                     # 外部節點
@@ -104,7 +140,9 @@ def load_config():
                         "config": node_cfg,
                     }
                 NODES.append(node)
+                print(f"      ✅ Added node: {node['name']} (type: {node.get('type', 'local')})")
             
+            print(f"   📊 Total nodes in NODES: {len(NODES)}")
             # 重新初始化節點狀態（只為新節點）
             for node in NODES:
                 if node["name"] not in node_stats:
@@ -165,7 +203,10 @@ def save_config(new_config: dict) -> Tuple[bool, str]:
             return False, "配置必須是 JSON 對象"
         
         # 創建備份
-        backup_file = f"{CONFIG_FILE}.backup.{int(time.time())}"
+        backups_dir = os.path.join(PROJECT_ROOT, "backups")
+        os.makedirs(backups_dir, exist_ok=True)
+        backup_filename = f"{os.path.basename(CONFIG_FILE)}.backup.{int(time.time())}"
+        backup_file = os.path.join(backups_dir, backup_filename)
         if os.path.exists(CONFIG_FILE):
             import shutil
             shutil.copy2(CONFIG_FILE, backup_file)
@@ -190,6 +231,10 @@ def save_config(new_config: dict) -> Tuple[bool, str]:
 
 # 節點配置（將從配置文件動態加載，必須在 load_config() 之前定義）
 NODES: List[Dict] = []
+
+# 節點狀態追蹤（必須在 load_config() 之前定義，因為 load_config() 會使用它們）
+node_stats: Dict[str, Dict] = {}
+node_models: Dict[str, Set[str]] = {}
 
 # 初始加載配置
 load_config()
@@ -233,9 +278,8 @@ node_health = Gauge(
 # 調度策略類型
 SCHEDULING_STRATEGY = os.getenv("SCHEDULING_STRATEGY", "round_robin")  # round_robin, least_connections, weighted_round_robin
 
-# 節點狀態追蹤
-node_stats: Dict[str, Dict] = {}
-node_models: Dict[str, Set[str]] = {}  # 每個節點上已下載的模型列表
+# 節點狀態追蹤（已在 load_config() 之前定義，這裡只是註釋說明）
+# node_stats 和 node_models 已在上面定義
 
 # 輪詢索引
 round_robin_index = 0
@@ -1243,7 +1287,7 @@ async def root():
 async def topology_viewer():
     """3D 網絡拓撲可視化頁面"""
     try:
-        html_file = os.path.join(os.path.dirname(__file__), "topology-3d.html")
+        html_file = os.path.join(PROJECT_ROOT, "static", "topology-3d.html")
         with open(html_file, 'r', encoding='utf-8') as f:
             html_content = f.read()
         return HTMLResponse(content=html_content)
@@ -1284,6 +1328,22 @@ async def health():
 @app.get("/api/nodes")
 async def get_nodes_api():
     """獲取所有節點狀態（JSON API）"""
+    # 如果 NODES 為空，嘗試重新加載配置
+    if not NODES:
+        print("⚠️  Warning: NODES list is empty in /api/nodes, attempting to reload config...")
+        load_config()
+        if not NODES:
+            print("❌ Error: NODES list is still empty after reload in /api/nodes")
+            print(f"   Config file path: {CONFIG_FILE}")
+            print(f"   Config file exists: {os.path.exists(CONFIG_FILE)}")
+            return {
+                "scheduling_strategy": SCHEDULING_STRATEGY,
+                "nodes": [],
+                "_error": "No nodes configured",
+                "_config_file": CONFIG_FILE,
+                "_config_file_exists": os.path.exists(CONFIG_FILE),
+            }
+    
     nodes_info = []
     for node in NODES:
         # 確保節點狀態已初始化

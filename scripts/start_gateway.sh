@@ -16,6 +16,6 @@ pip install -r requirements.txt
 
 # 啟動網關
 echo "Starting gateway on port ${GATEWAY_PORT:-11435}..."
-python3 ollama_gateway.py
+python3 src/ollama_gateway.py
 
 SCHEDULING_STRATEGY=round_robin

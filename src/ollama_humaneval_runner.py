@@ -324,7 +324,10 @@ def main():
     ap.add_argument("--model", default=default_model, required=not default_model, 
                     help=f"Ollama model name, e.g. qwen2.5-coder:14b (default from .env: {default_model})")
     ap.add_argument("--problems", required=True, help="Path to HumanEval problems.jsonl")
-    ap.add_argument("--out", default="results.jsonl", help="Output JSONL for per-problem results")
+    # 获取项目根目录
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DEFAULT_OUTPUT = os.path.join(PROJECT_ROOT, "data", "results.jsonl")
+    ap.add_argument("--out", default=DEFAULT_OUTPUT, help="Output JSONL for per-problem results")
     ap.add_argument("--limit", type=int, default=0, help="Limit number of problems (0 = all)")
     ap.add_argument("--num-samples", type=int, default=1, help="Completions per problem (for pass@k style); keep 1 for pass@1")
     ap.add_argument("--temperature", type=float, default=default_temperature, 

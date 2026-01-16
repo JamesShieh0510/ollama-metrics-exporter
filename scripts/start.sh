@@ -1,2 +1,2 @@
 pip install -r requirements.txt
-python ollama_exporter.py
+python src/ollama_exporter.py
